@@ -1,0 +1,28 @@
+[build-system]
+# 77 is the first setuptools that reads an SPDX license expression (PEP 639).
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tapewright"
+dynamic = ["version"]
+description = "Turn a link or a local file into an MP3 or MP4, on top of yt-dlp and FFmpeg"
+readme = "README.md"
+license = "GPL-3.0-or-later"
+license-files = ["LICENSE"]
+authors = [{ name = "AngrySandhill" }]
+requires-python = ">=3.10"
+# Deliberately empty: the app installs and updates yt-dlp itself, from its Settings tab.
+dependencies = []
+
+[project.optional-dependencies]
+ytdlp = ["yt-dlp[default]"]
+
+[project.gui-scripts]
+tapewright = "tapewright.app:main"
+
+[tool.setuptools.dynamic]
+version = { attr = "tapewright.__version__" }
+
+[tool.setuptools.packages.find]
+include = ["tapewright*"]
