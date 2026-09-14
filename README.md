@@ -40,6 +40,13 @@ For links you can cap the resolution. A local file is copied into the MP4 withou
 re-encoding when its codecs allow it. Otherwise it is re-encoded (x264 CRF 20, AAC 192 kbps).
 Only the first video and audio tracks are kept, and the log says what was left out.
 
+While a conversion runs, a cassette on the tab plays it out. Both reels turn and the tape winds
+from the left reel onto the right one as the job goes, never back, so it can already be full
+while a video's sound or a playlist's later videos are still coming. The display beside it says
+LOADING, PLAY or REC and counts the time, and the label shows the title of the video being
+downloaded, or the file's name for a file on this PC. The rest of the window has the same dark
+VCR look.
+
 Both tabs follow the same rules:
 
 - **Nothing is overwritten.** A local conversion whose name is taken becomes `name (1).mp3`.
@@ -101,7 +108,9 @@ tapewright/versions.py      comparing version strings from four projects
 tapewright/config.py        the settings file
 tapewright/help_content.py  every word the Help tab says
 tapewright/app.py           the window and the gates between checks, updates and conversions
+tapewright/theme.py         every color and font, and the code that applies the VCR look
 tapewright/convert_tab.py   the To MP3 and To MP4 tabs
+tapewright/deck.py          the cassette and display that show a conversion running
 tapewright/settings_tab.py  the Settings tab
 tapewright/help_tab.py      the Help tab
 tapewright/widgets.py       the log view, the banner, the warning dialog and the edit menu

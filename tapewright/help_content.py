@@ -60,8 +60,8 @@ TOPICS = [
                 "Come back to Tapewright and click the [To MP3] tab.",
                 f"Click inside the [Link or file] box, then paste the link: {PASTE}.",
                 "Click [Convert to MP3].",
-                "Wait while the bar fills up. When the message under the bar starts with a tick "
-                "and the word Saved, your music is ready.",
+                "Wait while the tape winds from the left reel onto the right one. When the "
+                "message under the tape starts with a tick and the word Saved, your music is ready.",
                 "Click [Show in folder] to see the new file.",
             ]),
             ("tip", "On YouTube you can also click Share under the video and then Copy. That copies "
@@ -149,10 +149,17 @@ TOPICS = [
             ("p", "It depends on how long the video is and how fast your internet is. A song "
                   "usually takes seconds. A long film can take many minutes."),
             ("list", [
-                "The bar, and the words under it, show how far along it is and how much time is "
-                "left.",
-                "Sometimes the bar slides back and forth without filling up. That is normal: "
-                "Tapewright is still working, on a step it cannot measure.",
+                "The tape winds from the left reel onto the right one as Tapewright works, and "
+                "it never winds back. A video's picture and sound come one after the other, and "
+                "a playlist's videos one after another, so the tape can be full while Tapewright "
+                "is still working. The words under the tape say what it is doing and how much "
+                "time is left.",
+                "The little screen beside the tape says [LOADING] while Tapewright gets ready, "
+                "[PLAY] while it downloads and [REC] while it makes your file. Its numbers count "
+                "how long it has been working.",
+                "Sometimes the reels keep turning but the tape does not move across. That is "
+                "normal: Tapewright is still working. The words under the tape say what it is "
+                "doing.",
                 "To stop, click [Cancel]. Anything half-finished is cleaned up, so no broken "
                 "files are left behind.",
                 "If you close the window while it is working, Tapewright asks you first.",
@@ -181,7 +188,9 @@ TOPICS = [
     {
         "title": "Something went wrong",
         "blocks": [
-            ("p", "The red words under the bar say what the problem was. Try these, one at a time:"),
+            ("p", "The red words under the tape say what the problem was. If a conversion had "
+                  "already started, the little screen beside the tape also says [ERROR]. Try "
+                  "these, one at a time:"),
             ("steps", [
                 "Check your internet: can you open a website in your browser?",
                 "Update the helpers: click the [Settings] tab, click [Check for updates], then "
@@ -201,7 +210,7 @@ TOPICS = [
         "title": "My file will not play",
         "blocks": [
             ("list", [
-                "Check that it finished: the message under the bar should start with a tick and "
+                "Check that it finished: the message under the tape should start with a tick and "
                 "say Saved.",
                 "For a video, convert it again on the [To MP4] tab with [Format] set to "
                 "Compatible. Some players cannot play the Best quality kind.",

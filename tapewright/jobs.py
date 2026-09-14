@@ -43,6 +43,7 @@ MP4_HEIGHT = {
 DL_MARK = "MGDL;"
 PP_MARK = "MGPP;"
 FILE_MARK = "MGFILE;"
+NAME_MARK = "MGNAME;"
 _DL_FIELDS = (
     "info.playlist_index", "info.n_entries", "info.vcodec", "info.acodec", "progress.status",
     "progress.downloaded_bytes", "progress.total_bytes", "progress.total_bytes_estimate",
@@ -52,6 +53,8 @@ DL_TEMPLATE = "download:" + DL_MARK + ";".join(f"%({name})s" for name in _DL_FIE
 PP_TEMPLATE = "postprocess:" + PP_MARK + "%(progress.postprocessor)s;%(progress.status)s"
 # after_move comes after every post-processor, so this is the finished MP3 or MP4.
 FILE_TEMPLATE = "after_move:" + FILE_MARK + "%(filepath)s"
+# before_dl comes once for each video, before it downloads, so a playlist names every video in turn.
+NAME_TEMPLATE = "before_dl:" + NAME_MARK + "%(title)s"
 
 POSTPROCESSOR_NAMES = {
     "ExtractAudio": "Converting to MP3",
@@ -207,7 +210,7 @@ def ytdlp_command(job):
         "--progress-template", DL_TEMPLATE,
         "--progress-template", PP_TEMPLATE,
         # --print implies --quiet unless told otherwise, and quiet hides the progress too.
-        "--print", FILE_TEMPLATE, "--no-quiet",
+        "--print", FILE_TEMPLATE, "--print", NAME_TEMPLATE, "--no-quiet",
         # The FFmpeg the Settings tab checked, not whichever one is first on PATH.
         "--ffmpeg-location", job.ffmpeg,
         "-P", str(Path(job.out_dir).resolve()), "-o", "%(title)s.%(ext)s",
@@ -364,7 +367,9 @@ def run_job(job, runner, emit):
     """Run one job to the end and return a Result.
 
     emit(kind, value) reports along the way: "log" (a line), "status" (a sentence),
-    "progress" (0..1, or None when there is no way to know) and "file" (a finished Path).
+    "progress" (0..1, or None when there is no way to know), "file" (a finished Path),
+    "phase" ("load", "play" or "record": what the tape deck shows) and "name" (the title of
+    the video about to download, for the cassette label).
     Cancelling, a tool failing, or a folder that can't be written all come back as a
     Result; only a bug in this module raises.
     """
@@ -385,12 +390,14 @@ def _run_download(job, runner, emit):
     files, errors, announced, present = [], [], {}, []
     emit("status", "Contacting the site…")
     emit("progress", None)
+    emit("phase", "load")
     emit("log", "$ " + procs.format_command(args))
 
     def on_line(line):
         download = parse_download(line)
         if download is not None:
             fraction, text = download
+            emit("phase", "play")
             emit("progress", fraction)
             emit("status", text)
             return
@@ -398,8 +405,12 @@ def _run_download(job, runner, emit):
         if step is not None:
             name, status = step
             if status != "finished":
+                emit("phase", "record")
                 emit("progress", None)
                 emit("status", name + "…")
+            return
+        if line.startswith(NAME_MARK):
+            emit("name", line[len(NAME_MARK):].strip())
             return
         if line.startswith(FILE_MARK):
             path = Path(line[len(FILE_MARK):].strip())
@@ -465,6 +476,7 @@ def _run_ffmpeg(args, runner, emit, duration, label):
     """Run one FFmpeg command with progress. Returns (exit code, last problem it reported)."""
     emit("status", label + "…")
     emit("progress", 0.0 if duration else None)
+    emit("phase", "record")
     emit("log", "$ " + procs.format_command(args))
     state = {"t": None, "speed": None}
     problems = collections.deque(maxlen=8)
@@ -501,6 +513,7 @@ def _run_local(job, runner, emit):
     src = Path(job.source)
     emit("status", "Reading the file…")
     emit("progress", None)
+    emit("phase", "load")
     streams, duration = _probe(job, runner, src)
     audio = [s for s in streams if s.get("codec_type") == "audio"]
     video = [s for s in streams if s.get("codec_type") == "video"

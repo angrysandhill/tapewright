@@ -8,11 +8,11 @@ import re
 import tkinter as tk
 from tkinter import ttk
 
-from tapewright import APP_NAME, __version__, deps, procs, versions, widgets
+from tapewright import APP_NAME, __version__, deps, procs, theme, versions, widgets
 
 STATE_COLORS = {
-    deps.OK: "#1e7d32", deps.OUTDATED: widgets.WARNING_RED, deps.MISSING: widgets.WARNING_RED,
-    deps.UNSUPPORTED: widgets.WARNING_RED, deps.UNKNOWN: "#8a6d00",
+    deps.OK: theme.C["ok"], deps.OUTDATED: theme.C["error"], deps.MISSING: theme.C["error"],
+    deps.UNSUPPORTED: theme.C["error"], deps.UNKNOWN: theme.C["warn"],
 }
 ROWS = (
     ("yt-dlp", "yt-dlp", "Downloads from links."),
@@ -61,14 +61,14 @@ class SettingsTab(ttk.Frame):
 
         for i, (key, name, role) in enumerate(ROWS):
             r = 1 + i * 2
-            name_label = ttk.Label(tools, text=name, font=("Segoe UI", 10, "bold"))
+            name_label = ttk.Label(tools, text=name, font=theme.FONTS["display"])
             name_label.grid(row=r, column=0, sticky="w", padx=(0, 16))
-            state = tk.Label(tools, text="Checking…", anchor="w", font=("Segoe UI", 9, "bold"))
+            state = tk.Label(tools, text="Checking…", anchor="w", font=theme.FONTS["small"])
             state.grid(row=r, column=1, sticky="w")
             action = ttk.Button(tools, text="Update", command=lambda k=key: self.app.run_updates([k]))
             action.grid(row=r, column=2, sticky="e")
             action.grid_remove()
-            detail = ttk.Label(tools, text=role, foreground="#555", justify="left")
+            detail = ttk.Label(tools, text=role, foreground=theme.C["text_dim"], justify="left")
             detail.grid(row=r + 1, column=0, columnspan=3, sticky="w", pady=(2, 10))
             self.rows[key] = {"name": name_label, "state": state, "action": action, "detail": detail}
         tools.bind("<Configure>", self._rewrap)

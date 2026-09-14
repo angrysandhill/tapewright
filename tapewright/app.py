@@ -15,7 +15,7 @@ import tkinter as tk
 import traceback
 from tkinter import messagebox, ttk
 
-from tapewright import APP_NAME, __version__, config, deps, procs, widgets
+from tapewright import APP_NAME, __version__, config, deps, procs, theme, widgets
 from tapewright.convert_tab import ConvertTab
 from tapewright.help_tab import HelpTab
 from tapewright.settings_tab import SettingsTab
@@ -42,12 +42,14 @@ class App:
         self.confirm = lambda title, message: messagebox.askyesno(title, message, parent=self.root)
         self.inform = lambda title, message: messagebox.showinfo(title, message, parent=self.root)
 
+        theme.apply(root)  # before the first widget: styles only reach widgets created after it
         root.title(f"{APP_NAME} {__version__}")
         scale = root.winfo_fpixels("1i") / 96.0
         width = min(int(900 * scale), root.winfo_screenwidth() - int(40 * scale))
         height = min(int(760 * scale), root.winfo_screenheight() - int(90 * scale))
         root.geometry(f"{width}x{height}")
-        root.minsize(int(720 * scale), int(560 * scale))
+        # Tall enough for the tape deck and a few lines of log, but never taller than the screen.
+        root.minsize(int(720 * scale), min(int(680 * scale), root.winfo_screenheight() - int(90 * scale)))
 
         self.notebook = ttk.Notebook(root)
         self.notebook.pack(fill="both", expand=True, padx=8, pady=8)

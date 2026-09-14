@@ -6,9 +6,7 @@ import sys
 import tkinter as tk
 from tkinter import ttk
 
-from tapewright import deps
-
-WARNING_RED = "#b3261e"
+from tapewright import deps, theme
 
 
 class LogView(ttk.Frame):
@@ -22,8 +20,10 @@ class LogView(ttk.Frame):
 
     def __init__(self, master, height=10):
         super().__init__(master)
-        self.text = tk.Text(self, height=height, wrap="none", state="disabled",
-                            font=("Consolas", 9), relief="solid", borderwidth=1)
+        self.text = tk.Text(self, height=height, wrap="none", state="disabled", font=theme.FONTS["mono"],
+                            relief="flat", borderwidth=0, highlightthickness=1,
+                            highlightbackground=theme.C["edge"], highlightcolor=theme.C["edge"],
+                            padx=6, pady=4)
         ys = ttk.Scrollbar(self, orient="vertical", command=self.text.yview)
         xs = ttk.Scrollbar(self, orient="horizontal", command=self.text.xview)
         self.text.configure(yscrollcommand=ys.set, xscrollcommand=xs.set)
@@ -60,13 +60,14 @@ class Banner(tk.Frame):
     """A red strip naming whatever is out of date. It removes itself when there is nothing to say."""
 
     def __init__(self, master, on_open_settings):
-        super().__init__(master, background=WARNING_RED, padx=10, pady=6)
-        self.label = tk.Label(self, background=WARNING_RED, foreground="white", anchor="w",
-                              justify="left", font=("Segoe UI", 9, "bold"))
+        c = theme.C
+        super().__init__(master, background=c["banner"], padx=10, pady=6)
+        self.label = tk.Label(self, background=c["banner"], foreground=c["banner_text"], anchor="w",
+                              justify="left", font=theme.FONTS["display"])
         self.label.pack(side="left", fill="x", expand=True)
         tk.Button(self, text="Open Settings", command=on_open_settings, relief="flat",
-                  background="white", foreground=WARNING_RED, activebackground="#f2d4d1",
-                  font=("Segoe UI", 9, "bold"), padx=8).pack(side="right")
+                  background=c["banner_text"], foreground=c["banner"], activebackground=c["banner_key"],
+                  activeforeground=c["banner"], font=theme.FONTS["display"], padx=8).pack(side="right")
         self.bind("<Configure>", lambda e: self.label.configure(wraplength=max(e.width - 160, 200)))
 
     def set_problems(self, problems):
@@ -100,18 +101,18 @@ def ask_outdated(parent, problems, blocked):
         heading = "This can't start until these are fixed:"
     else:
         heading = "Out-of-date tools are a common reason downloads fail:"
-    tk.Label(body, text="⚠  " + heading, foreground=WARNING_RED, font=("Segoe UI", 11, "bold"),
+    tk.Label(body, text="⚠  " + heading, foreground=theme.C["error"], font=theme.FONTS["display"],
              anchor="w", justify="left").pack(fill="x", pady=(0, 10))
     for d in problems:
         version = f"  {d.installed}" if d.installed else ""
         if d.latest and d.state == deps.OUTDATED:
             version += f"  →  {d.latest}"
         ttk.Label(body, text=f"{d.name} — {deps.STATE_LABELS[d.state]}{version}",
-                  font=("Segoe UI", 10, "bold")).pack(anchor="w")
+                  font=theme.FONTS["display"]).pack(anchor="w")
         ttk.Label(body, text=d.detail, wraplength=460, justify="left").pack(anchor="w", pady=(0, 8))
     if blocked and any(d.state != deps.MISSING or not d.required for d in blocked):
         ttk.Label(body, text="Settings are set to block conversions while a tool is out of date.",
-                  foreground="#555").pack(anchor="w", pady=(0, 8))
+                  foreground=theme.C["text_dim"]).pack(anchor="w", pady=(0, 8))
 
     buttons = ttk.Frame(body)
     buttons.pack(fill="x", pady=(8, 0))

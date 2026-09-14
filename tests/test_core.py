@@ -19,6 +19,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from tapewright import config, deps, help_content, jobs, procs, versions  # noqa: E402
 
+try:  # both draw with Tk; a Python built without it can still run every other test
+    from tapewright import deck, theme  # noqa: E402
+except ImportError:
+    deck = theme = None
+
 
 class Versions(unittest.TestCase):
     def test_shapes_from_each_project(self):
@@ -144,7 +149,9 @@ class Commands(unittest.TestCase):
 
     def test_mp3_link(self):
         args = jobs.ytdlp_command(self.job())
-        self.assertTrue(self.contains(args, ["--print", jobs.FILE_TEMPLATE, "--no-quiet"]))
+        self.assertTrue(self.contains(args, ["--print", jobs.FILE_TEMPLATE]))
+        self.assertTrue(self.contains(args, ["--print", jobs.NAME_TEMPLATE]))
+        self.assertIn("--no-quiet", args)
         self.assertTrue(self.contains(args, ["-x", "--audio-format", "mp3", "--audio-quality", "0"]))
         self.assertTrue(self.contains(args, ["--ffmpeg-location", "C:/ff/ffmpeg.exe"]))
         self.assertIn("--no-post-overwrites", args)
@@ -191,10 +198,39 @@ class FakeRunner:
 
 
 class Download(unittest.TestCase):
-    def run_lines(self, lines, code=0):
+    def run_lines(self, lines, code=0, events=None):
         job = jobs.Job(target="mp3", kind="url", source="https://youtu.be/abc", out_dir=Path("."),
                        ffmpeg="ffmpeg", ffprobe="ffprobe")
-        return jobs.run_job(job, FakeRunner(lines, code), lambda *event: None)
+        emit = (lambda *event: events.append(event)) if events is not None else (lambda *event: None)
+        return jobs.run_job(job, FakeRunner(lines, code), emit)
+
+    def test_the_deck_hears_each_phase_and_the_title(self):
+        events = []
+        self.run_lines(["MGNAME;Song; the remix",
+                        "[info] Writing video thumbnail 41 to: C:/x/Song; the remix [abc].webp",
+                        "[download] Destination: C:/x/Song; the remix [abc].fhls-1080p.mp4",
+                        "MGDL;NA;NA;none;opus;downloading;1024;3275248;NA;106914.4;30",
+                        "MGPP;ExtractAudio;started", "MGFILE;C:/x/Song; the remix [abc].mp3"],
+                       events=events)
+        phases = [value for kind, value in events if kind == "phase"]
+        changes = [p for i, p in enumerate(phases) if i == 0 or p != phases[i - 1]]
+        self.assertEqual(changes, ["load", "play", "record"])
+        # The title comes whole from yt-dlp, semicolon and all, never from a file name.
+        self.assertEqual([value for kind, value in events if kind == "name"], ["Song; the remix"])
+
+    def test_a_local_file_loads_then_records(self):
+        with tempfile.TemporaryDirectory() as d:
+            src = Path(d) / "clip.mp4"
+            src.write_bytes(b"x")
+            job = jobs.Job(target="mp3", kind="file", source=str(src), out_dir=Path(d),
+                           ffmpeg="ffmpeg", ffprobe="ffprobe")
+            events = []
+            lines = ['{"streams": [{"index": 0, "codec_type": "audio", "codec_name": "aac"}], '
+                     '"format": {"duration": "10"}}',
+                     "out_time_us=5000000", "progress=continue", "progress=end"]
+            self.assertTrue(jobs.run_job(job, FakeRunner(lines), lambda *e: events.append(e)).ok)
+            self.assertEqual([v for k, v in events if k == "phase"], ["load", "record"])
+            self.assertEqual([v for k, v in events if k == "name"], [])
 
     def test_saved(self):
         result = self.run_lines(["[ExtractAudio] Destination: C:/x/song.mp3", "MGFILE;C:/x/song.mp3"])
@@ -209,6 +245,50 @@ class Download(unittest.TestCase):
         result = self.run_lines(["[youtube] abc: Downloading webpage",
                                  "ERROR: [youtube] abc: Video unavailable"], 1)
         self.assertEqual((result.ok, result.message), (False, "[youtube] abc: Video unavailable"))
+
+
+class Look(unittest.TestCase):
+    ROOT = Path(__file__).resolve().parents[1]
+
+    @unittest.skipIf(theme is None, "a Python built without Tk")
+    def test_every_listed_pair_is_readable(self):
+        self.assertAlmostEqual(theme.contrast("#000000", "#ffffff"), 21.0)
+        for foreground, background, minimum in theme.CONTRAST:
+            ratio = theme.contrast(theme.C[foreground], theme.C[background])
+            self.assertGreaterEqual(ratio, minimum, f"{foreground} on {background} is only {ratio:.2f}:1")
+
+    def test_colors_are_only_spelled_out_in_theme(self):
+        found = []
+        for path in (self.ROOT / "tapewright").glob("*.py"):
+            if path.name == "theme.py":
+                continue
+            for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+                if (isinstance(node, ast.Constant) and isinstance(node.value, str)
+                        and re.fullmatch(r"#[0-9a-fA-F]{3}(?:[0-9a-fA-F]{3})?|white|black", node.value)):
+                    found.append(f"{path.name}:{node.lineno} {node.value}")
+        self.assertEqual(found, [], "use theme.C, so the palette stays in one place")
+
+    @unittest.skipIf(deck is None, "a Python built without Tk")
+    def test_the_reels_always_hold_the_same_tape(self):
+        hub, full = 10.0, 30.0
+        self.assertEqual(deck.reel_radii(0, hub, full), (full, hub))
+        self.assertEqual(deck.reel_radii(1, hub, full), (hub, full))
+        for fraction in (0.1, 0.5, 0.9):
+            supply, take = deck.reel_radii(fraction, hub, full)
+            self.assertAlmostEqual(supply ** 2 + take ** 2, hub ** 2 + full ** 2)
+        slow, fast = deck.reel_speeds(0.0, hub, full)
+        self.assertGreater(fast, slow)            # the nearly empty take-up reel spins faster
+        self.assertTrue(slow > 0 and fast > 0)
+        # Playing turns both reels clockwise, and rewinding turns them back.
+        self.assertTrue(all(deck.MODES[mode][1] > 0 for mode in ("load", "play", "record")))
+        self.assertLess(deck.MODES["rewind"][1], 0)
+
+    @unittest.skipIf(deck is None, "a Python built without Tk")
+    def test_counter_and_digits(self):
+        self.assertEqual(deck.counter_text(3725), "1:02:05")
+        self.assertEqual(deck.counter_text(36059), "0:00:59")
+        self.assertEqual(set(deck.SEGMENTS), set("0123456789"))
+        self.assertTrue(all(set(lit) <= set("abcdefg") for lit in deck.SEGMENTS.values()))
 
 
 class Leftovers(unittest.TestCase):
@@ -324,7 +404,16 @@ class Help(unittest.TestCase):
         labels = {label for topic in help_content.TOPICS for text in self.texts(topic)
                   for label in re.findall(r"\[([^\[\]]+)\]", text)}
         self.assertGreater(len(labels), 10)
-        missing = sorted(label for label in labels if not any(label in s for s in strings))
+        # A word from the deck's display must be one of its modes exactly: "ERROR" is also part of
+        # every "ERROR:" line jobs.py reads, so a substring match could never fail for it.
+        display = {words for words, _speed in deck.MODES.values()} if deck else None
+
+        def on_screen(label):
+            if label.isupper() and display is not None:
+                return label in display
+            return any(label in s for s in strings)
+
+        missing = sorted(label for label in labels if not on_screen(label))
         self.assertEqual(missing, [], "the Help tab names things that are no longer on screen")
 
     def test_every_action_has_a_handler(self):

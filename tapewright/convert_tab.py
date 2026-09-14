@@ -11,8 +11,10 @@ import tkinter as tk
 import traceback
 from pathlib import Path
 from tkinter import filedialog, ttk
+from urllib.parse import urlparse
 
-from tapewright import config, deps, jobs, procs, widgets
+from tapewright import config, deps, jobs, procs, theme, widgets
+from tapewright.deck import TapeDeck
 
 _VIDEO = "*.mp4 *.mkv *.webm *.mov *.avi *.m4v *.flv *.wmv *.mpg *.mpeg *.ts *.3gp"
 _AUDIO = "*.m4a *.aac *.wav *.flac *.ogg *.opus *.wma *.mp3"
@@ -22,7 +24,7 @@ FILETYPES = {
 }
 # Spelled out in full rather than assembled: the Help tab quotes these, and its test looks for
 # them word for word in the source.
-START_LABELS = {"mp3": "Convert to MP3", "mp4": "Convert to MP4"}
+START_LABELS = {"mp3": "▶  Convert to MP3", "mp4": "▶  Convert to MP4"}
 COVER_LABELS = {"mp3": "Add the thumbnail as cover art (links)", "mp4": "Embed the thumbnail (links)"}
 
 
@@ -47,7 +49,8 @@ class ConvertTab(ttk.Frame):
 
     def _build(self):
         self.columnconfigure(1, weight=1)
-        self.rowconfigure(8, weight=1)
+        # Weighted rows give up space first; without a floor the log is what vanishes on a short window.
+        self.rowconfigure(8, weight=1, minsize=int(110 * self.winfo_fpixels("1i") / 96))
 
         self.banner = widgets.Banner(self, self.app.show_settings)
         self.banner.grid(row=0, column=0, columnspan=3, sticky="ew", pady=(0, 10))
@@ -62,7 +65,7 @@ class ConvertTab(ttk.Frame):
         self.browse_button.grid(row=1, column=2, padx=(8, 0))
         what = "a video or audio file" if self.target == "mp3" else "a video file"
         ttk.Label(self, text=f"Paste a link (YouTube and most video sites), or choose {what} on this PC.",
-                  foreground="#666").grid(row=2, column=1, sticky="w", pady=(2, 10))
+                  foreground=theme.C["text_dim"]).grid(row=2, column=1, sticky="w", pady=(2, 10))
 
         ttk.Label(self, text="Save to:").grid(row=3, column=0, sticky="w", padx=(0, 8))
         self.out_entry = ttk.Entry(self, textvariable=self.out_dir)
@@ -86,7 +89,7 @@ class ConvertTab(ttk.Frame):
                                       self.app.settings["mp4_max_height"])
             ttk.Label(options, text="Resolution applies to links. A local file keeps its own "
                                     "size, and is copied as is when its codecs allow.",
-                      foreground="#666").grid(row=2, column=1, sticky="w", pady=(0, 6))
+                      foreground=theme.C["text_dim"]).grid(row=2, column=1, sticky="w", pady=(0, 6))
         checks = ttk.Frame(options)
         checks.grid(row=3, column=0, columnspan=2, sticky="w", pady=(6, 0))
         for text, var in ((COVER_LABELS[self.target], self.thumbnail),
@@ -99,13 +102,13 @@ class ConvertTab(ttk.Frame):
         buttons.grid(row=5, column=0, columnspan=3, sticky="ew")
         self.start_button = ttk.Button(buttons, text=START_LABELS[self.target], command=self.start)
         self.start_button.pack(side="left")
-        self.cancel_button = ttk.Button(buttons, text="Cancel", command=self.cancel)
+        self.cancel_button = ttk.Button(buttons, text="■  Cancel", command=self.cancel)
         self.cancel_button.pack(side="left", padx=8)
-        ttk.Button(buttons, text="Show in folder", command=self.open_folder).pack(side="left")
+        ttk.Button(buttons, text="⏏  Show in folder", command=self.open_folder).pack(side="left")
         ttk.Button(buttons, text="Copy log", command=self.copy_log).pack(side="right")
 
-        self.progress = ttk.Progressbar(self, maximum=100)
-        self.progress.grid(row=6, column=0, columnspan=3, sticky="ew", pady=(12, 4))
+        self.deck = TapeDeck(self)
+        self.deck.grid(row=6, column=0, columnspan=3, sticky="w", pady=(12, 6))
         self.status_label = ttk.Label(self, textvariable=self.status, anchor="w", justify="left")
         self.status_label.grid(row=7, column=0, columnspan=3, sticky="ew", pady=(0, 8))
         self.bind("<Configure>", lambda e: self.status_label.configure(wraplength=max(e.width - 30, 200)))
@@ -131,7 +134,7 @@ class ConvertTab(ttk.Frame):
 
     def set_status(self, text, error=False):
         self.status.set(text)
-        self.status_label.configure(foreground=widgets.WARNING_RED if error else "")
+        self.status_label.configure(foreground=theme.C["error"] if error else "")
 
     def log(self, text):
         for line in str(text).splitlines() or [""]:
@@ -149,16 +152,12 @@ class ConvertTab(ttk.Frame):
                 widget.state(["disabled"] if busy else ["!disabled"])
         self.cancel_button.state(["!disabled"] if busy else ["disabled"])
 
-    def _set_progress(self, fraction):
-        if fraction is None:
-            if str(self.progress.cget("mode")) != "indeterminate":
-                self.progress.configure(mode="indeterminate")
-                self.progress.start(15)
-            return
-        if str(self.progress.cget("mode")) != "determinate":
-            self.progress.stop()
-            self.progress.configure(mode="determinate")
-        self.progress["value"] = max(0.0, min(fraction, 1.0)) * 100
+    @staticmethod
+    def _tape_label(kind, source):
+        """The cassette's label until yt-dlp reports a title: a file's name, or a link's site."""
+        if kind == "file":
+            return Path(source).stem
+        return urlparse(str(source)).netloc.removeprefix("www.") or "LINK"
 
     def on_deps_changed(self):
         self.banner.set_problems(deps.problems_for(self.app.deps, "url"))
@@ -209,7 +208,7 @@ class ConvertTab(ttk.Frame):
         runner = self.runner = procs.Runner(tool_dirs)
         self.files = []
         self._set_running(True)
-        self._set_progress(None)
+        self.deck.load(self._tape_label(kind, source))
         self.log(f"—— {datetime.datetime.now():%H:%M:%S}  {source}")
 
         def emit(event, value):
@@ -233,7 +232,11 @@ class ConvertTab(ttk.Frame):
         elif event == "status":
             self.set_status(value)
         elif event == "progress":
-            self._set_progress(value)
+            self.deck.set_progress(value)
+        elif event == "phase":
+            self.deck.set_mode(value)
+        elif event == "name":
+            self.deck.set_label(value)
         elif event == "file":
             self.files.append(Path(value))
 
@@ -241,7 +244,7 @@ class ConvertTab(ttk.Frame):
         if runner is not self.runner:
             return
         self.runner = None
-        self._set_progress(1.0 if result.ok else 0.0)
+        self.deck.finish(result.ok, result.cancelled)
         if result.ok:
             self.set_status("✔  " + result.message)
         elif result.cancelled:

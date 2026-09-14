@@ -7,8 +7,9 @@ the app does; this file covers what must stay true while you change it.
 
 The half with no window is `jobs.py`, `deps.py`, `procs.py`, `versions.py`, `config.py` and
 `help_content.py`. None of them imports tkinter, so all of it runs headless and is what the
-tests drive. The window half is `app.py`, `convert_tab.py`, `settings_tab.py`, `help_tab.py`
-and `widgets.py`.
+tests drive. The window half is `app.py`, `convert_tab.py`, `settings_tab.py`, `help_tab.py`,
+`deck.py`, `theme.py` and `widgets.py`; the pure functions in `deck.py` and `theme.py` (the reel
+geometry, the contrast ratio) are tested without a window.
 
 It uses the standard library only, deliberately. External tools are run as programs, never
 imported.
@@ -46,7 +47,9 @@ was built.
   with nothing left to kill it. This matters because local jobs run ffprobe and then up to
   two ffmpeg passes.
 - **`--print` implies `--quiet` unless `--no-quiet` is given, and quiet hides progress.**
-  The finished path comes from `--print after_move:...`, so both flags are needed.
+  The finished path comes from `--print after_move:...`, so both flags are needed. The
+  cassette's title comes from `--print before_dl:...` rather than from a file name, whose format
+  ids (`.f251`, `.fhls-1080p`) no pattern strips reliably.
 - **In the MP4 sort order the resolution cap goes before `quality`.** `-t mp4`'s order puts
   `quality` first. YouTube's quality ranking follows resolution, so a cap in the preset's
   position does nothing: `res:360` there downloaded 1080p.
@@ -95,6 +98,22 @@ was built.
 - **Every box the Help tab mentions has a right-click menu and Ctrl+A**
   (`widgets.add_edit_menu`). Tk entries come with neither, and the Help tab tells people to
   right-click and paste.
+- **Every color is spelled out in `theme.C` and nowhere else.** A test fails on a hex color, or
+  on white or black, spelled out in any other module, and `theme.CONTRAST` lists the pairs that
+  must stay readable, checked against WCAG ratios. Body text keeps 7:1: the Help tab is written
+  for people who find computers hard, and a dark theme is only kind to them if its words are
+  bright.
+- **ttk runs on "clam", and `theme.apply()` runs before the first widget exists.** Windows'
+  native "vista" theme ignores style colors. Classic Tk widgets get the palette from the option
+  database by class (`*Text.background`), never a bare `*Background`, which ttk widgets also
+  read as an option that then overrides their style's state maps.
+- **The deck follows `phase` events from `jobs.py`, never the wording of status messages.** It
+  animates only while something moves: the `after` loop stops once the reels are still and the
+  tape has caught up, and `<Destroy>` cancels it. Clockwise means an increasing angle, because
+  canvas y points down.
+- **The tape never winds backwards during a job.** An MP4 download fetches the video and then
+  the audio, and the second starts its progress again at zero; tape running back reads as
+  starting over. Only a new job rewinds.
 
 ## Licensing
 
@@ -135,3 +154,4 @@ runs the app, since the app installs into whichever Python runs it.
 - There is no GPU encoding and no drag-and-drop: Tk has none without the tkdnd extension.
 - The Help tab's wording assumes Windows: File Explorer, the yellow folder on the taskbar,
   Windows+E. On macOS or Linux the steps are right but some of the names are not.
+- There is one look, the dark VCR one; no light or system theme to switch to.

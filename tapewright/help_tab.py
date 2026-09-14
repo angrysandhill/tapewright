@@ -7,12 +7,11 @@ import tkinter as tk
 import tkinter.font as tkfont
 from tkinter import ttk
 
-from tapewright import help_content
+from tapewright import help_content, theme
 
 # Past 16 pt the question list, which cannot wrap, leaves the answer a column a few words wide
 # in the default window.
 MIN_SIZE, MAX_SIZE = 9, 16
-LINK_BLUE = "#1f5fa8"
 _MARKUP = re.compile(r"(\[[^\[\]]+\]|<[^<>]+>)")
 
 
@@ -32,10 +31,11 @@ class HelpTab(ttk.Frame):
         super().__init__(master, padding=12)
         self.app = app
         size = min(max(app.settings["help_text_size"], MIN_SIZE), MAX_SIZE)
+        family = theme.FONTS["ui"].cget("family")  # the Help text resizes, so it needs its own Fonts
         self.fonts = {
-            "body": tkfont.Font(self, family="Segoe UI", size=size),
-            "bold": tkfont.Font(self, family="Segoe UI", size=size, weight="bold"),
-            "title": tkfont.Font(self, family="Segoe UI", size=size + 5, weight="bold"),
+            "body": tkfont.Font(self, family=family, size=size),
+            "bold": tkfont.Font(self, family=family, size=size, weight="bold"),
+            "title": tkfont.Font(self, family=family, size=size + 5, weight="bold"),
         }
         # This tab's buttons and labels grow with the help text, so they stay as easy to read and
         # to hit. A style that holds a named font follows that font when its size changes.
@@ -58,8 +58,8 @@ class HelpTab(ttk.Frame):
         # The list cannot wrap, which is why tests/test_core.py keeps titles to 30 characters.
         self.topics = tk.Listbox(self, font=self.fonts["body"], width=30, activestyle="none",
                                  exportselection=False, relief="solid", borderwidth=1,
-                                 highlightthickness=0, selectbackground=LINK_BLUE,
-                                 selectforeground="white")
+                                 highlightthickness=0, selectbackground=theme.C["select"],
+                                 selectforeground=theme.C["text"])
         for topic in help_content.TOPICS:
             self.topics.insert("end", " " + topic["title"])
         self.topics.grid(row=1, column=0, sticky="ns", padx=(0, 12))
@@ -69,15 +69,16 @@ class HelpTab(ttk.Frame):
         answer.grid(row=0, column=1, rowspan=2, sticky="nsew")
         answer.columnconfigure(0, weight=1)
         answer.rowconfigure(0, weight=1)
-        self.text = tk.Text(answer, wrap="word", font=self.fonts["body"], relief="solid",
-                            borderwidth=1, padx=18, pady=14, cursor="arrow", takefocus=False)
+        self.text = tk.Text(answer, wrap="word", font=self.fonts["body"], relief="solid", borderwidth=1,
+                            padx=18, pady=14, cursor="arrow", takefocus=False,
+                            background=theme.C["panel"], foreground=theme.C["text"])
         scroll = ttk.Scrollbar(answer, orient="vertical", command=self.text.yview)
         self.text.configure(yscrollcommand=scroll.set)
         self.text.grid(row=0, column=0, sticky="nsew")
         scroll.grid(row=0, column=1, sticky="ns")
         self.actions = ttk.Frame(answer)
         self.actions.grid(row=1, column=0, sticky="w", pady=(10, 0))
-        ttk.Label(answer, textvariable=self.message, foreground="#1e7d32", style="Help.TLabel").grid(
+        ttk.Label(answer, textvariable=self.message, foreground=theme.C["ok"], style="Help.TLabel").grid(
             row=2, column=0, sticky="w", pady=(4, 0))
 
         size_row = ttk.Frame(self)
@@ -93,15 +94,16 @@ class HelpTab(ttk.Frame):
         body = self.fonts["body"]
         indent = 6 + body.measure("00.") + 2 * body.measure(" ")
         t = self.text
-        t.tag_configure("title", font=self.fonts["title"], spacing3=12)
+        c = theme.C
+        t.tag_configure("title", font=self.fonts["title"], foreground=c["vfd"], spacing3=12)
         t.tag_configure("para", spacing3=10)
         t.tag_configure("item", lmargin1=6, lmargin2=indent, tabs=(indent,), spacing3=8)
-        t.tag_configure("tip", background="#fff4cc", lmargin1=6, lmargin2=6, rmargin=6,
-                        spacing1=4, spacing3=12)
+        t.tag_configure("tip", background=c["tip"], foreground=c["tip_text"], lmargin1=6, lmargin2=6,
+                        rmargin=6, spacing1=4, spacing3=12)
         # Created last, so these win over the block tags above when both apply.
         t.tag_configure("strong", font=self.fonts["bold"])
-        t.tag_configure("ui", font=self.fonts["bold"], foreground=LINK_BLUE)
-        t.tag_configure("key", font=self.fonts["bold"], background="#e6e6e6")
+        t.tag_configure("ui", font=self.fonts["bold"], foreground=c["link"])
+        t.tag_configure("key", font=self.fonts["bold"], background=c["keycap"], foreground=c["text"])
 
     # ------------------------------------------------------------ showing an answer
 
