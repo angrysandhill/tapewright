@@ -1,0 +1,39 @@
+# SPDX-FileCopyrightText: 2026 AngrySandhill
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# The unit tests need no network and no installed tools, so they run on a bare runner: Windows
+# and Linux, on the oldest Python pyproject.toml accepts (3.10) and on 3.14. The window tests
+# build Tk withdrawn; Linux runners have no display, so they get a virtual one from xvfb, which
+# the ubuntu-latest image (Ubuntu 24.04 as of 2026-09) includes along with Tk.
+name: Tests
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  unittest:
+    name: ${{ matrix.os }}, Python ${{ matrix.python }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+        python: ["3.10", "3.14"]
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Unit tests
+        if: runner.os == 'Windows'
+        run: python -m unittest discover -s tests -v
+      - name: Unit tests, on a virtual display
+        if: runner.os == 'Linux'
+        run: xvfb-run -a python -m unittest discover -s tests -v

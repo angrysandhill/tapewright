@@ -5,11 +5,13 @@ the app does; this file covers what must stay true while you change it.
 
 ## Shape
 
-The half with no window is `jobs.py`, `deps.py`, `procs.py`, `versions.py`, `config.py` and
-`help_content.py`. None of them imports tkinter, so all of it runs headless and is what the
-tests drive. The window half is `app.py`, `convert_tab.py`, `settings_tab.py`, `help_tab.py`,
-`deck.py`, `theme.py` and `widgets.py`; the pure functions in `deck.py` and `theme.py` (the reel
-geometry, the contrast ratio) are tested without a window.
+The half with no window is `jobs.py`, `deps.py`, `procs.py`, `versions.py`, `config.py`,
+`help_content.py` and `launch.py`. None of them imports tkinter when it is imported (`launch.py`
+tries to inside `problem()`, to say when it is missing, and `launch.main()` hands over to
+`app.py`), so all of it runs headless. The window half is `app.py`, `convert_tab.py`,
+`settings_tab.py`, `help_tab.py`, `deck.py`, `theme.py` and `widgets.py`. The tests drive the
+first half directly, test the pure functions in `deck.py` and `theme.py` (the reel geometry, the
+contrast ratio) without a window, and build the real window withdrawn in the `Window` class.
 
 It uses the standard library only, deliberately. External tools are run as programs, never
 imported.
@@ -26,8 +28,8 @@ imported.
 
 ## Invariants
 
-Each of these was measured failing, or was verified against the real tool, while the app
-was built.
+Most of these were measured failing, or verified against the real tool, while the app was
+built. Where one comes from a tool's documentation or source instead, it says so.
 
 - **Python children get `PYTHONUTF8=1` and `PYTHONIOENCODING=utf-8`** (`procs.child_env`).
   On Windows' ANSI code page, yt-dlp *drops* the characters it can't encode from the paths
@@ -67,7 +69,8 @@ was built.
   `--upgrade` never downgrades. Offline with nothing cached, there is no version to pin.
 - **A check never raises, and "can't tell" is never "outdated."** A failed check becomes
   `UNKNOWN`. `versions.is_newer` returns False whenever either side doesn't parse, since a
-  false "outdated" puts a hard warning in front of every conversion.
+  false "outdated" puts a hard warning in front of every conversion. The same goes for a
+  JavaScript runtime whose version can't be read: it is `UNKNOWN`, not too old.
 - **`versions.release_date` requires a year of 2000 or later.** Otherwise `2.9.6` is a
   valid date.
 - **Tools are found with a fallback past `PATH`** (`deps.find_tool`). A winget upgrade of
@@ -75,9 +78,45 @@ was built.
   already-running app never sees. Jobs then receive the exact path the check found, through
   `--ffmpeg-location` and `--js-runtimes NAME:PATH`. yt-dlp splits that on the first colon,
   so a Windows drive letter is safe.
+- **winget's `Packages` folders are searched, not only `Links`, and versioned folders compare as
+  versions.** winget doesn't always make a `Links` entry for a portable package; on the PC this
+  was built on, `Links` is empty and FFmpeg's own `bin` folder is on `PATH` instead. Sorted by
+  name, `ffmpeg-9.0.1-full_build` beats `ffmpeg-10.0-full_build`. deno's winget package should
+  keep `deno.exe` at the package folder's root: its manifest puts the exe at the zip's top, and
+  Rojo's package on the same PC is laid out that way, but no winget deno was installed to check.
+- **`ffprobe` is taken from `ffmpeg`'s own folder when it is there** (`deps.check_ffmpeg`), so
+  the two come from one install whenever that install has both, and only then searched for
+  separately. Without that search, FFmpeg would be called missing on a setup that works for local
+  files, which blocks every conversion. yt-dlp only ever looks beside the ffmpeg given to
+  `--ffmpeg-location`, so a separately found ffprobe serves local-file jobs alone.
+- **winget runs with `--source winget --accept-source-agreements --accept-package-agreements`**
+  beside `--disable-interactivity` (`deps._winget_command`). With interactivity off, winget
+  can't ask a profile that never accepted its source's terms, and stops with 0x8A150046 instead
+  (that code is from winget's `returnCodes.md`; the failure was not reproduced here). Exit codes
+  are looked up after `& 0xFFFFFFFF`: Windows returns them unsigned, while winget's documentation
+  lists each one both ways. An `install` also passes `--no-upgrade`: without it winget turns an
+  install of a package it already has into an upgrade, and answers 0x8A15002B (no applicable
+  update) rather than 0x8A150061 (already installed). That was read from winget-cli's
+  `UpdateFlow.cpp`, not reproduced here.
+- **"Try again later" is said only for a tool that is out of date** (`deps.update_failure_text`).
+  For a tool that is behind, 0x8A15002B means winget hasn't caught up yet: its package list often
+  trails gyan.dev's release by days. For anything else, such as the ffprobe gone from a current
+  FFmpeg, waiting fixes nothing, and neither does reopening when winget keeps a record of a tool
+  whose files are gone (0x8A150061). The update log says so, and names
+  `winget uninstall --id <package>` as the way back, since nothing in the window can reinstall.
 - **The JavaScript runtime minimums in `deps.JS_MINIMUM` mirror `MIN_SUPPORTED_VERSION` in
   yt-dlp's `utils/_jsruntime.py`** (as of 2026.08.19). Re-check them when yt-dlp's release
   notes mention runtimes.
+- **The launchers parse and import on any Python 3.** `Tapewright.pyw`, `tapewright/__init__.py`,
+  `tapewright/__main__.py` and `tapewright/launch.py` run before the version check can, and an
+  error under `pythonw.exe` shows nothing at all. No f-strings, annotations (Python 3.9 evaluates
+  `tuple[str, str] | None` at import), walrus, `match`, positional-only parameters, numeric
+  underscores or parenthesized `with` in them. A test fails on those, though not on every newer
+  construct.
+- **A Python that can't run Tapewright says why.** `launch.main()` checks for Python 3.10 and
+  Tkinter, and `app.main()` catches a Tk that imports but can't open a window, with advice chosen
+  by the cause (`launch.tk_failure_fix`): reinstalling Python doesn't bring a display, or clear a
+  stray `TCL_LIBRARY`. On Windows the explanation is a message box.
 - **Only the Tk main thread touches widgets.** Workers call `App.post()`. Every job event
   carries its `Runner`, and events from any runner other than the tab's current one are
   dropped, so a late event from a finished job can't repaint the next one.
@@ -88,6 +127,17 @@ was built.
   runs, for the same reason.
 - **The warning dialog's default button is never "Convert anyway".** Going ahead with a
   broken tool has to be a deliberate click.
+- **The confirmation before an update is in plain words** (`deps.describe_update`): what the tool
+  does, where it comes from and, for winget, that terms are accepted for the user, which nobody
+  could tell from its flags. The exact command still goes to the update log as it starts.
+- **The update log ends a batch with "Finished updating."**, which the Help tab tells people to
+  wait for; the words live once, in `help_content.UPDATES_FINISHED`. A Cancel that skips queued
+  tools names them instead, and that batch never claims to have finished.
+- **The window names each tool by its role first** (`Dep.label`, "Downloader (yt-dlp)") in the
+  Settings rows, the red banner, the warning box, the confirmation before an update and the update
+  log, and the Help tab uses the same role names. A missing YouTube helper is named after what
+  would fill the gap, "deno" when the Install button fetches it, so the box that accepts license
+  terms says whose they are.
 - **An unreadable settings file is renamed to `settings.json.bad`, not overwritten.** It may
   have been edited by hand.
 - **The Help tab only names things that are really on screen.** Its text marks each button,
@@ -135,12 +185,21 @@ build, and a build with `--enable-nonfree` can't be redistributed at all.
 python -m unittest discover -s tests -v
 ```
 
-The unit tests need no window, no network and no installed tools. There is no automated
-end-to-end suite yet. To drive the real window against the real tools from a script, replace
-the modal pieces (`app.ask_outdated`, `app.confirm` and `app.inform` are attributes for
-exactly this reason) and set `TAPEWRIGHT_CONFIG_DIR` to a scratch folder so the run never
-touches real settings. Test the pip update path inside a throwaway venv whose `python.exe`
-runs the app, since the app installs into whichever Python runs it.
+The unit tests need no network and no installed tools. The `Window` class builds the real window
+withdrawn, so nothing appears. It skips only where there is no display to open one on (not
+Windows, and no `DISPLAY`); anywhere else a Tk that fails to start is a failure, never a skip.
+Likewise only `import tkinter` may turn into a skip: an `ImportError` from Tapewright's own
+modules has to fail.
+
+`.github/workflows/test.yml` runs everything on Windows and Ubuntu with Python 3.10 and 3.14, the
+Ubuntu jobs under `xvfb-run` so the window tests run there too. A test that passes on 3.14 alone
+has not shown it works on the oldest Python `pyproject.toml` accepts.
+
+There is no automated end-to-end suite yet. To drive the real window against the real tools from
+a script, replace the modal pieces (`app.ask_outdated`, `app.confirm` and `app.inform` are
+attributes for exactly this reason) and set `TAPEWRIGHT_CONFIG_DIR` to a scratch folder so the
+run never touches real settings. Test the pip update path inside a throwaway venv whose
+`python.exe` runs the app, since the app installs into whichever Python runs it.
 
 ## Known gaps
 
@@ -148,9 +207,14 @@ runs the app, since the app installs into whichever Python runs it.
   in its own Python, so there is one update path, and it is tested.
 - The FFmpeg and deno update buttons have been run by hand (on 2026-09-13: FFmpeg 8.1.1 to
   9.0.1 through winget, deno 2.8.3 to 2.9.6 through `deno upgrade`). Nothing exercises them
-  automatically, since running one changes the machine.
+  automatically, since running one changes the machine. That winget run came before its
+  commands gained `--source`, the accept flags and `--no-upgrade` in 0.1.1, and the new command
+  lines haven't been run against the real winget since. Nor has the reinstall advice the update
+  log gives when winget can't help (`winget uninstall --id`, then Install).
 - On macOS and Linux, FFmpeg is only checked for presence, because a distribution's version
   lags upstream on purpose.
+- Outside Windows, a Python that can't run Tapewright is explained only on stderr, so starting
+  it from a desktop launcher on Linux or macOS still shows nothing.
 - There is no GPU encoding and no drag-and-drop: Tk has none without the tkdnd extension.
 - The Help tab's wording assumes Windows: File Explorer, the yellow folder on the taskbar,
   Windows+E. On macOS or Linux the steps are right but some of the names are not.

@@ -19,7 +19,8 @@ dependencies = []
 ytdlp = ["yt-dlp[default]"]
 
 [project.gui-scripts]
-tapewright = "tapewright.app:main"
+# Through launch, which explains a Python without Tkinter instead of failing silently.
+tapewright = "tapewright.launch:main"
 
 [tool.setuptools.dynamic]
 version = { attr = "tapewright.__version__" }

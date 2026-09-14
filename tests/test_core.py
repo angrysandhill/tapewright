@@ -1,28 +1,35 @@
 # SPDX-FileCopyrightText: 2026 AngrySandhill
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""The parts with no window and no network.
+"""Everything that needs no network and no installed tools. The window is only ever built withdrawn.
 
     python -m unittest discover -s tests -v
 """
 
 import ast
 import datetime
+import importlib
+import io
+import itertools
 import os
 import re
 import sys
 import tempfile
+import tokenize
 import unittest
 from pathlib import Path
 from unittest import mock
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
 
-from tapewright import config, deps, help_content, jobs, procs, versions  # noqa: E402
+from tapewright import config, deps, help_content, jobs, launch, procs, versions  # noqa: E402
 
-try:  # both draw with Tk; a Python built without it can still run every other test
-    from tapewright import deck, theme  # noqa: E402
+try:  # the window half draws with Tk; a Python built without it can still run every other test
+    import tkinter
 except ImportError:
-    deck = theme = None
+    tkinter = deck = theme = None
+else:  # outside the try, so an ImportError from Tapewright's own modules fails instead of skipping
+    from tapewright import deck, theme  # noqa: E402
 
 
 class Versions(unittest.TestCase):
@@ -248,8 +255,6 @@ class Download(unittest.TestCase):
 
 
 class Look(unittest.TestCase):
-    ROOT = Path(__file__).resolve().parents[1]
-
     @unittest.skipIf(theme is None, "a Python built without Tk")
     def test_every_listed_pair_is_readable(self):
         self.assertAlmostEqual(theme.contrast("#000000", "#ffffff"), 21.0)
@@ -259,7 +264,7 @@ class Look(unittest.TestCase):
 
     def test_colors_are_only_spelled_out_in_theme(self):
         found = []
-        for path in (self.ROOT / "tapewright").glob("*.py"):
+        for path in (ROOT / "tapewright").glob("*.py"):
             if path.name == "theme.py":
                 continue
             for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
@@ -355,6 +360,115 @@ class Deps(unittest.TestCase):
         found["ffmpeg"].state = deps.MISSING
         self.assertEqual([d.key for d in deps.blocking(deps.problems_for(found, "file"), "warn")], ["ffmpeg"])
 
+    def test_winget_commands_can_not_stop_to_ask(self):
+        args = deps._winget_command("winget", "upgrade", "Gyan.FFmpeg")
+        self.assertEqual(args[:5], ["winget", "upgrade", "--id", "Gyan.FFmpeg", "--exact"])
+        for flag in ("--disable-interactivity", "--accept-source-agreements", "--accept-package-agreements"):
+            self.assertIn(flag, args)
+        self.assertEqual(args[args.index("--source") + 1], "winget")
+        self.assertNotIn("--no-upgrade", args)
+        self.assertEqual(deps._winget_command("winget", "install", "DenoLand.Deno")[-1], "--no-upgrade")
+        winget_exe = r"C:\Users\x\AppData\Local\Microsoft\WindowsApps\winget.EXE"
+        self.assertTrue(deps.is_winget([winget_exe, "upgrade"]))
+        self.assertFalse(deps.is_winget(deps.ytdlp_install_command("2026.9.10", True)))
+        self.assertFalse(deps.is_winget([]))
+
+    def test_winget_exit_codes_arrive_with_either_sign(self):
+        unsigned = 0x8A150046  # APPINSTALLER_CLI_ERROR_SOURCE_AGREEMENTS_NOT_ACCEPTED
+        self.assertEqual(unsigned - 2 ** 32, -1978335162)  # the signed form returnCodes.md lists
+        self.assertIn("terms", deps.winget_message(unsigned))
+        self.assertEqual(deps.winget_message(unsigned), deps.winget_message(-1978335162))
+        self.assertIn("try again later", deps.winget_message(deps.WINGET_UPDATE_NOT_APPLICABLE))
+        self.assertEqual(deps.winget_message(0), "")
+        self.assertIn("output is above", deps.winget_message(0x8A15FFFF))
+        self.assertTrue(all(0x8A150000 <= code <= 0x8A15FFFF for code in deps.WINGET_MESSAGES))
+
+    def test_update_confirmation_is_in_plain_words(self):
+        pip = deps.Dep("yt-dlp", "yt-dlp", True, action="Update",
+                       command=deps.ytdlp_install_command("2026.9.10", True))
+        text = deps.describe_update(pip)
+        self.assertEqual(text.split(". ")[0], "Update the Downloader (yt-dlp) to version 2026.9.10")
+        self.assertIn("pypi.org", text)
+        install = deps.Dep("yt-dlp", "yt-dlp", True, action="Install",
+                           command=deps.ytdlp_install_command("", True))
+        self.assertTrue(deps.describe_update(install).startswith(
+            "Install the newest version of the Downloader (yt-dlp)."))
+        stable = deps.Dep("yt-dlp", "yt-dlp", True, action="Switch to stable",
+                          command=deps.ytdlp_install_command("2026.9.10", True))
+        self.assertTrue(deps.describe_update(stable).startswith(
+            "Switch the Downloader (yt-dlp) to 2026.9.10,"))
+        missing_deno = deps.Dep("js", "deno", False, action="Install deno",
+                                command=deps._winget_command("winget", "install", "DenoLand.Deno"))
+        self.assertTrue(deps.describe_update(missing_deno).startswith(
+            "Install the YouTube helper (deno) with winget"))
+        winget = deps.Dep("ffmpeg", "FFmpeg", True, action="Update",
+                          command=deps._winget_command("winget", "upgrade", "Gyan.FFmpeg"))
+        text = deps.describe_update(winget)
+        self.assertIn("Converter (FFmpeg)", text)
+        self.assertIn("terms", text)  # winget accepts them for the user, so the box has to say so
+        deno = deps.Dep("js", "deno", False, action="Update",
+                        command=[r"C:\Users\x\.deno\bin\deno.exe", "upgrade"])
+        self.assertIn("deno's own updater", deps.describe_update(deno))
+        for dep in (pip, install, stable, missing_deno, winget, deno):
+            self.assertNotIn("--", deps.describe_update(dep))
+
+    def test_labels_say_what_each_tool_is_for(self):
+        self.assertEqual(deps.Dep("yt-dlp", "yt-dlp", True).label, "Downloader (yt-dlp)")
+        self.assertEqual(deps.Dep("js", "Node.js", False).label, "YouTube helper (Node.js)")
+        self.assertEqual(deps.Dep("other", "Other", False).label, "Other")
+
+    def test_a_missing_youtube_helper_is_named_after_what_would_fill_the_gap(self):
+        with mock.patch.object(deps, "find_tool", return_value=""):
+            with mock.patch.object(deps, "_winget", return_value="winget"):
+                dep, _ = deps.check_js("auto", {}, False)
+                self.assertEqual((dep.label, dep.action), ("YouTube helper (deno)", "Install deno"))
+                dep, _ = deps.check_js("node", {}, False)
+                self.assertEqual((dep.label, dep.command), ("YouTube helper (Node.js)", []))
+            with mock.patch.object(deps, "_winget", return_value=""):
+                dep, _ = deps.check_js("auto", {}, False)
+                self.assertEqual((dep.label, dep.state), ("YouTube helper (deno or Node.js)", deps.MISSING))
+                dep, _ = deps.check_js("deno", {}, False)
+                self.assertEqual((dep.label, dep.state), ("YouTube helper (deno)", deps.MISSING))
+        dep, _ = deps.check_js("none", {}, False)
+        self.assertEqual((dep.label, dep.state), ("YouTube helper (deno or Node.js)", deps.OK))
+
+    def test_a_youtube_helper_whose_version_cannot_be_read_is_unknown_not_too_old(self):
+        deno = r"C:\Users\x\AppData\Local\Microsoft\WinGet\Packages\DenoLand.Deno_x\deno.exe"
+        timed_out = (None, "deno.exe gave no answer within 30s")
+        with mock.patch.object(deps, "find_tool", side_effect=lambda name: deno if name == "deno" else ""), \
+                mock.patch.object(deps, "_winget", return_value="winget"), \
+                mock.patch.object(procs, "run_capture", return_value=timed_out):
+            dep, _ = deps.check_js("auto", {}, False)
+        self.assertEqual((dep.state, dep.installed, dep.action), (deps.UNKNOWN, "", ""))
+        self.assertIn("gave no answer", dep.detail)
+        self.assertEqual(deps.problems_for({"js": dep}, "url"), [])
+
+    def test_try_again_later_only_for_a_tool_that_is_behind(self):
+        upgrade = deps._winget_command("winget", "upgrade", "Gyan.FFmpeg")
+        behind = deps.Dep("ffmpeg", "FFmpeg", True, state=deps.OUTDATED, command=upgrade)
+        self.assertIn("try again later", deps.update_failure_text(behind, deps.WINGET_UPDATE_NOT_APPLICABLE))
+        # A current FFmpeg with its ffprobe gone gets the same code, and waiting would never fix it.
+        broken = deps.Dep("ffmpeg", "FFmpeg", True, state=deps.MISSING, command=upgrade)
+        text = deps.update_failure_text(broken, deps.WINGET_UPDATE_NOT_APPLICABLE - 2 ** 32)
+        self.assertNotIn("try again later", text)
+        self.assertIn("winget uninstall --id Gyan.FFmpeg", text)
+        self.assertTrue(text.endswith("(winget exit code 0x8A15002B)"), text)
+        too_old = deps.Dep("js", "deno", False, state=deps.UNSUPPORTED,
+                           command=deps._winget_command("winget", "upgrade", "DenoLand.Deno"))
+        text = deps.update_failure_text(too_old, deps.WINGET_UPDATE_NOT_APPLICABLE)
+        self.assertNotIn("try again later", text)
+        self.assertIn("winget uninstall --id DenoLand.Deno", text)
+        # winget still has a record of a tool whose files are gone: reopening can't fix that alone.
+        gone = deps.Dep("ffmpeg", "FFmpeg", True, state=deps.MISSING,
+                        command=deps._winget_command("winget", "install", "Gyan.FFmpeg"))
+        text = deps.update_failure_text(gone, deps.WINGET_ALREADY_INSTALLED)
+        self.assertIn("open it again", text)
+        self.assertIn("winget uninstall --id Gyan.FFmpeg", text)
+        pip = deps.Dep("yt-dlp", "yt-dlp", True, state=deps.OUTDATED,
+                       command=deps.ytdlp_install_command("", True))
+        self.assertEqual(deps.update_failure_text(pip, 1),
+                         "the command exited with code 1; its output is above.")
+
     def test_offline_falls_back_to_cache_then_to_age(self):
         def offline(*_):
             raise OSError("no network")
@@ -371,9 +485,266 @@ class Deps(unittest.TestCase):
             self.assertIn("no network", dep.detail)
 
 
-class Help(unittest.TestCase):
-    ROOT = Path(__file__).resolve().parents[1]
+class FindTool(unittest.TestCase):
+    """Where tools are found on a pretend Windows profile, with nothing on PATH."""
 
+    WINGET_SOURCE = "_Microsoft.Winget.Source_8wekyb3d8bbwe"
+
+    def setUp(self):
+        folder = tempfile.TemporaryDirectory()
+        self.addCleanup(folder.cleanup)
+        self.root = Path(folder.name)
+        self.packages = self.root / "Microsoft" / "WinGet" / "Packages"
+        for patch in (mock.patch.object(deps, "WINDOWS", True),
+                      mock.patch.object(deps.shutil, "which", return_value=None),
+                      mock.patch.dict(os.environ, {"LOCALAPPDATA": str(self.root)}),
+                      mock.patch.object(deps.Path, "home", return_value=self.root / "home")):
+            patch.start()
+            self.addCleanup(patch.stop)
+
+    def touch(self, path):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"")
+        return path
+
+    def test_versioned_folders_sort_as_versions_whatever_order_they_arrive_in(self):
+        def exe(folder):
+            return Path("Packages") / "Gyan.FFmpeg" / folder / "bin" / "ffmpeg.exe"
+
+        newest_first = [exe("ffmpeg-10.1-full_build"), exe("ffmpeg-10.0-full_build"),
+                        exe("ffmpeg-9.0.1-full_build"), exe("unversioned")]
+        self.assertGreater("ffmpeg-9.0.1-full_build", "ffmpeg-10.1-full_build")  # by name, 9.0.1 would win
+        for order in itertools.permutations(newest_first):
+            self.assertEqual(deps._newest_first(order), newest_first)
+
+    def test_the_newest_ffmpeg_folder_is_the_one_found(self):
+        package = self.packages / f"Gyan.FFmpeg{self.WINGET_SOURCE}"
+        for version in ("9.0.1", "10.1", "10.0"):
+            self.touch(package / f"ffmpeg-{version}-full_build" / "bin" / "ffmpeg.exe")
+        newest = package / "ffmpeg-10.1-full_build" / "bin" / "ffmpeg.exe"
+        self.assertEqual(deps.find_tool("ffmpeg"), str(newest))
+
+    def test_a_winget_deno_with_no_link_is_found_before_the_home_copy(self):
+        self.touch(self.root / "home" / ".deno" / "bin" / "deno.exe")
+        packaged = self.touch(self.packages / f"DenoLand.Deno{self.WINGET_SOURCE}" / "deno.exe")
+        self.assertEqual(deps.find_tool("deno"), str(packaged))
+        packaged.unlink()
+        self.assertEqual(deps.find_tool("deno"), str(self.root / "home" / ".deno" / "bin" / "deno.exe"))
+
+    def test_ffprobe_beside_ffmpeg_comes_before_a_separate_search(self):
+        bin_dir = self.packages / f"Gyan.FFmpeg{self.WINGET_SOURCE}" / "ffmpeg-9.0.1-full_build" / "bin"
+        ffmpeg = self.touch(bin_dir / "ffmpeg.exe")
+        ffprobe = self.touch(bin_dir / "ffprobe.exe")
+        elsewhere = self.touch(self.root / "other" / "ffprobe.exe")
+        found = {"ffmpeg": str(ffmpeg), "ffprobe": str(elsewhere)}
+        with mock.patch.object(deps, "find_tool", side_effect=found.get), \
+                mock.patch.object(deps, "_winget", return_value=""), \
+                mock.patch.object(procs, "run_capture", return_value=(0, "ffmpeg version 9.0.1-full_build")):
+            dep, _ = deps.check_ffmpeg({}, False)
+            self.assertEqual(dep.ffprobe, str(ffprobe))
+            # Deliberately still found elsewhere: calling this FFmpeg missing would block every
+            # conversion for a setup that works for local files.
+            ffprobe.unlink()
+            dep, _ = deps.check_ffmpeg({}, False)
+            self.assertEqual(dep.ffprobe, str(elsewhere))
+
+
+class Launch(unittest.TestCase):
+    def test_an_old_python_is_explained(self):
+        with mock.patch.object(sys, "version_info", (3, 9, 18, "final", 0)):
+            reason, fix = launch.problem()
+        self.assertIn("needs Python 3.10 or newer, and this copy of Python is 3.9", reason)
+        self.assertIn("open Tapewright again", fix)
+
+    def test_a_python_without_tkinter_is_explained(self):
+        with mock.patch.dict(sys.modules, {"tkinter": None}):  # None in sys.modules makes the import fail
+            reason, fix = launch.problem()
+        self.assertIn("no Tkinter", reason)
+        self.assertIn("Tkinter", fix)
+
+    @unittest.skipIf(tkinter is None, "a Python built without Tk")
+    def test_a_usable_python_starts(self):
+        self.assertIsNone(launch.problem())
+
+    def test_the_explanation_reaches_a_console_and_on_windows_a_box(self):
+        expected = "Tapewright can't start, because it is a test.\n\nNothing to fix."
+        # ctypes is faked for both branches, so no real, modal message box can ever open here.
+        for os_name, boxes, stderr in (("nt", 1, mock.Mock()), ("posix", 0, mock.Mock()), ("nt", 1, None)):
+            fake_ctypes, fake_os = mock.Mock(), mock.Mock()
+            fake_os.name = os_name
+            with mock.patch.dict(sys.modules, {"ctypes": fake_ctypes}), \
+                    mock.patch.object(launch, "os", fake_os), mock.patch.object(sys, "stderr", stderr):
+                launch.explain("it is a test.", "Nothing to fix.")
+            box = fake_ctypes.windll.user32.MessageBoxW
+            self.assertEqual(box.call_count, boxes)
+            if boxes:
+                self.assertTrue(box.call_args.args[1].startswith(expected))
+            if stderr is not None:
+                written = "".join(call.args[0] for call in stderr.write.call_args_list)
+                self.assertTrue(written.startswith(expected))
+
+    def test_main_explains_and_never_opens_the_window(self):
+        window = mock.Mock()
+        window.main.return_value = 0
+        with mock.patch.dict(sys.modules, {"tapewright.app": window}):
+            with mock.patch.object(launch, "problem", return_value=("a reason.", "a fix.")), \
+                    mock.patch.object(launch, "explain") as explain:
+                self.assertEqual(launch.main(), 1)
+            explain.assert_called_once_with("a reason.", "a fix.")
+            window.main.assert_not_called()
+            with mock.patch.object(launch, "problem", return_value=None):
+                self.assertEqual(launch.main(), 0)
+            window.main.assert_called_once_with()
+
+    def test_every_way_in_goes_through_launch(self):
+        for path in (ROOT / "Tapewright.pyw", ROOT / "tapewright" / "__main__.py"):
+            imports = [(node.module, [alias.name for alias in node.names])
+                       for node in ast.walk(ast.parse(path.read_text(encoding="utf-8")))
+                       if isinstance(node, ast.ImportFrom)]
+            self.assertIn(("tapewright.launch", ["main"]), imports, path.name)
+        pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+        self.assertIn('tapewright = "tapewright.launch:main"', pyproject)
+
+    def test_a_window_that_cannot_open_gets_the_fix_for_its_cause(self):
+        with mock.patch.dict(os.environ, {"TCL_LIBRARY": "", "TK_LIBRARY": ""}):
+            no_display = "no display name and no $DISPLAY environment variable"
+            self.assertIn("desktop", launch.tk_failure_fix(no_display))
+            self.assertIn("desktop", launch.tk_failure_fix('couldn\'t connect to display ":0"'))
+            self.assertIn("Reinstalling Python", launch.tk_failure_fix("Can't find a usable init.tcl"))
+        with mock.patch.dict(os.environ, {"TCL_LIBRARY": r"C:\ActiveTcl\lib\tcl8.6", "TK_LIBRARY": ""}):
+            fix = launch.tk_failure_fix("Can't find a usable init.tcl")
+            self.assertIn("TCL_LIBRARY", fix)
+            self.assertNotIn("TK_LIBRARY", fix)
+
+    def test_the_launchers_parse_on_any_python_3(self):
+        # They run before the version check, so a newer Python's syntax here would fail under
+        # pythonw.exe, which shows nothing at all. ast.parse on a new Python accepts syntax an old
+        # one rejects, so this catches only the constructs most likely to slip in, not every one.
+        newer = (ast.JoinedStr, ast.NamedExpr, ast.AnnAssign) + tuple(
+            getattr(ast, name) for name in ("Match", "TryStar", "TypeAlias") if hasattr(ast, name))
+        for path in (ROOT / "Tapewright.pyw", ROOT / "tapewright" / "__init__.py",
+                     ROOT / "tapewright" / "__main__.py", ROOT / "tapewright" / "launch.py"):
+            source = path.read_text(encoding="utf-8")
+            for token in tokenize.generate_tokens(io.StringIO(source).readline):
+                if token.type == tokenize.NUMBER:  # 1_000 is Python 3.6
+                    self.assertNotIn("_", token.string, f"{path.name}:{token.start[0]}")
+            for node in ast.walk(ast.parse(source)):
+                where = f"{path.name}:{getattr(node, 'lineno', '?')}"
+                self.assertNotIsInstance(node, newer, where)
+                if isinstance(node, ast.arguments):
+                    self.assertEqual(node.posonlyargs, [], where)
+                    # Python 3.9 evaluates an annotation such as tuple[str, str] | None at import.
+                    every = node.args + node.kwonlyargs + [a for a in (node.vararg, node.kwarg) if a]
+                    self.assertEqual([a.arg for a in every if a.annotation is not None], [], where)
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    self.assertIsNone(node.returns, where)
+                if isinstance(node, ast.With):  # with (a as x, b as y): is Python 3.9
+                    self.assertFalse(re.match(r"with\s*\(", ast.get_source_segment(source, node)), where)
+
+
+@unittest.skipIf(tkinter is None, "a Python built without Tk")
+class Window(unittest.TestCase):
+    """The window half. The real window is built withdrawn, so nothing appears on screen.
+
+    Skipped without tkinter. With no display to open a window on (not Windows, and no DISPLAY), only
+    the tests that open one skip, so a Python 3.10 run still imports the whole package. Anywhere
+    else, a Tk that can't open a window is a failure.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        # Imported here rather than at the top, so an app that can't import fails only this class.
+        from tapewright import app
+        cls.tk, cls.app = tkinter, app
+
+    def test_every_module_imports(self):
+        for path in sorted((ROOT / "tapewright").glob("*.py")):
+            if path.stem not in ("__init__", "__main__"):
+                importlib.import_module(f"tapewright.{path.stem}")
+
+    def test_a_tk_that_cannot_open_a_window_is_explained(self):
+        error = self.tk.TclError("no display name and no $DISPLAY environment variable")
+        # Of tkinter, only Tk is patched: the except clause reads tk.TclError, which must stay real.
+        with mock.patch.object(self.app.tk, "Tk", side_effect=error), \
+                mock.patch.object(self.app, "_enable_dpi_awareness"), \
+                mock.patch.object(self.app.config, "Settings"), \
+                mock.patch.object(self.app.launch, "explain") as explain:
+            self.assertEqual(self.app.main(), 1)
+        reason, fix = explain.call_args.args
+        self.assertIn("no display name", reason)
+        self.assertIn("desktop", fix)
+
+    def open_window(self):
+        """The real App on a withdrawn root, with yt-dlp and FFmpeg out of date and no checks run."""
+        try:
+            root = self.tk.Tk()
+        except self.tk.TclError as e:
+            if os.name == "nt" or os.environ.get("DISPLAY"):
+                raise  # a broken Tk where a window can open is a failure, not a reason to skip
+            self.skipTest(f"no display to open a window on: {e}")
+        root.withdraw()
+        self.addCleanup(root.destroy)
+        folder = tempfile.TemporaryDirectory()
+        self.addCleanup(folder.cleanup)
+        no_checks = mock.patch.object(self.app.App, "check_dependencies")  # no tools, no network
+        no_checks.start()
+        self.addCleanup(no_checks.stop)
+        app = self.app.App(root, config.Settings(Path(folder.name) / "settings.json"))
+        ytdlp = deps.Dep("yt-dlp", "yt-dlp", True, state=deps.OUTDATED, installed="2026.8.19",
+                         latest="2026.9.10", action="Update",
+                         command=deps.ytdlp_install_command("2026.9.10", True))
+        ffmpeg = deps.Dep("ffmpeg", "FFmpeg", True, state=deps.OUTDATED, installed="9.0.1", latest="9.1",
+                          action="Update", command=deps._winget_command("winget", "upgrade", "Gyan.FFmpeg"))
+        js = deps.Dep("js", "deno", False, state=deps.OK, installed="2.9.6")
+        app._check_finished({"yt-dlp": ytdlp, "ffmpeg": ffmpeg, "js": js}, {}, False)
+        root.update_idletasks()
+        return app
+
+    def test_the_window_names_tools_by_role_and_explains_each_update(self):
+        app = self.open_window()
+        self.assertEqual(app.settings_tab.rows["yt-dlp"]["name"].cget("text"), "Downloader (yt-dlp)")
+        self.assertIn("Converter (FFmpeg) is out of date", app.mp3_tab.banner.label.cget("text"))
+
+        asked = []
+        app.confirm = lambda title, message: asked.append(message) or False
+        self.assertFalse(app.run_updates(["yt-dlp", "ffmpeg"]))
+        self.assertIn("pypi.org", asked[0])
+        self.assertIn("terms", asked[0])
+        self.assertNotIn("--", asked[0])
+
+    def test_the_update_log_says_how_a_batch_ended(self):
+        app = self.open_window()
+        ytdlp, ffmpeg = app.deps["yt-dlp"], app.deps["ffmpeg"]
+
+        # As if winget had just finished: nothing newer yet, and the batch is over.
+        app.updating, app._update_queue, app._update_cancelled = "ffmpeg", [], False
+        app._update_finished(ffmpeg, deps.WINGET_UPDATE_NOT_APPLICABLE, "")
+        lines = app.settings_tab.logview.contents().splitlines()
+        failure = deps.update_failure_text(ffmpeg, deps.WINGET_UPDATE_NOT_APPLICABLE)
+        self.assertEqual(lines[-2], "Converter (FFmpeg): " + failure)
+        self.assertEqual(lines[-1], help_content.UPDATES_FINISHED + ".")
+        self.assertIsNone(app.updating)
+        app.updating = "yt-dlp"
+        app._update_finished(ytdlp, None, "cancelled")
+        self.assertIn("update cancelled", app.settings_tab.logview.contents().splitlines()[-1])
+
+        # Cancel lands just after yt-dlp finished, with FFmpeg still queued: the log says FFmpeg was
+        # skipped, and the batch must not end with the line Help says means it all finished.
+        app.updating, app._update_runner = "yt-dlp", mock.Mock()
+        app._update_queue, app._update_cancelled = [ffmpeg], False
+        app.cancel_update()
+        self.assertEqual(app._update_queue, [])
+        self.assertEqual(app.settings_tab.logview.contents().splitlines()[-1],
+                         "Update cancelled. Not updated: the Converter (FFmpeg).")
+        app._update_finished(ytdlp, 0, "")
+        self.assertEqual(app.settings_tab.logview.contents().splitlines()[-1], "Downloader (yt-dlp): done.")
+        # And a new batch starts clean, so its end is announced again.
+        with mock.patch.object(app, "_next_update"):
+            self.assertTrue(app.run_updates(["yt-dlp"], confirm=False))
+        self.assertFalse(app._update_cancelled)
+
+
+class Help(unittest.TestCase):
     @staticmethod
     def texts(topic):
         for _kind, value in topic["blocks"]:
@@ -396,7 +767,7 @@ class Help(unittest.TestCase):
 
     def test_every_label_it_names_is_on_screen(self):
         strings = set()
-        for path in (self.ROOT / "tapewright").glob("*.py"):
+        for path in (ROOT / "tapewright").glob("*.py"):
             if path.name != "help_content.py":
                 tree = ast.parse(path.read_text(encoding="utf-8"))
                 strings.update(node.value for node in ast.walk(tree)
@@ -416,11 +787,15 @@ class Help(unittest.TestCase):
         missing = sorted(label for label in labels if not on_screen(label))
         self.assertEqual(missing, [], "the Help tab names things that are no longer on screen")
 
+    def test_help_waits_for_the_line_the_update_log_really_ends_with(self):
+        topic = next(t for t in help_content.TOPICS if t["title"] == "What is the red warning?")
+        self.assertIn(f"says {help_content.UPDATES_FINISHED},", " ".join(self.texts(topic)))
+        app_source = (ROOT / "tapewright" / "app.py").read_text(encoding="utf-8")
+        self.assertIn("help_content.UPDATES_FINISHED", app_source)
+
+    @unittest.skipIf(tkinter is None, "a Python built without Tk")
     def test_every_action_has_a_handler(self):
-        try:
-            from tapewright import help_tab
-        except ImportError as e:  # a Python built without Tk
-            self.skipTest(str(e))
+        from tapewright import help_tab  # here, not at the top, so only this test fails if it can't import
         self.assertEqual(set(help_tab.HelpTab.HANDLERS), set(help_content.ACTION_LABELS))
         for method in help_tab.HelpTab.HANDLERS.values():
             self.assertTrue(callable(getattr(help_tab.HelpTab, method, None)), method)
@@ -428,10 +803,10 @@ class Help(unittest.TestCase):
 
 class License(unittest.TestCase):
     def test_every_source_file_names_the_license(self):
-        root = Path(__file__).resolve().parents[1]
-        self.assertTrue((root / "LICENSE").is_file())
-        sources = [*root.glob("tapewright/*.py"), *root.glob("tests/*.py"), root / "Tapewright.pyw"]
-        missing = [p.relative_to(root).as_posix() for p in sorted(sources)
+        self.assertTrue((ROOT / "LICENSE").is_file())
+        sources = [*ROOT.glob("tapewright/*.py"), *ROOT.glob("tests/*.py"),
+                   *ROOT.glob(".github/workflows/*.yml"), ROOT / "Tapewright.pyw"]
+        missing = [p.relative_to(ROOT).as_posix() for p in sorted(sources)
                    if "SPDX-License-Identifier: GPL-3.0-or-later" not in p.read_text(encoding="utf-8")[:400]]
         self.assertEqual(missing, [], "start these files with the two SPDX lines (see AGENTS.md)")
 

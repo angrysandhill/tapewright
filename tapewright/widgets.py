@@ -74,7 +74,7 @@ class Banner(tk.Frame):
         if not problems:
             self.grid_remove()
             return
-        parts = [f"{d.name} is {deps.STATE_LABELS[d.state].lower()}" for d in problems]
+        parts = [f"{d.label} is {deps.STATE_LABELS[d.state].lower()}" for d in problems]
         self.label.configure(text="⚠  " + "; ".join(parts) + ". Conversions will warn before they start.")
         self.grid()
 
@@ -107,7 +107,7 @@ def ask_outdated(parent, problems, blocked):
         version = f"  {d.installed}" if d.installed else ""
         if d.latest and d.state == deps.OUTDATED:
             version += f"  →  {d.latest}"
-        ttk.Label(body, text=f"{d.name} — {deps.STATE_LABELS[d.state]}{version}",
+        ttk.Label(body, text=f"{d.label} — {deps.STATE_LABELS[d.state]}{version}",
                   font=theme.FONTS["display"]).pack(anchor="w")
         ttk.Label(body, text=d.detail, wraplength=460, justify="left").pack(anchor="w", pady=(0, 8))
     if blocked and any(d.state != deps.MISSING or not d.required for d in blocked):

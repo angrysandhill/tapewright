@@ -11,16 +11,24 @@ Only download what you have the right to. Many sites' terms forbid downloading.
 
 ## Running it
 
-You need Python 3.10 or newer with Tkinter; the python.org installers include both.
+You need Python 3.10 or newer with Tkinter. The Python from python.org includes Tkinter on
+Windows and macOS; on Linux it is often a separate package, such as `python3-tk` on Debian and
+Ubuntu.
 
 ```
 python -m tapewright
 ```
 
 On Windows you can also double-click `Tapewright.pyw`, which starts it without a console window.
+If that Python is too old or has no Tkinter, a message box says so and what to install, rather
+than nothing happening at all.
 
-On first launch the Settings tab lists anything that is missing. yt-dlp installs with one
-click (through pip, into the same Python). On Windows, FFmpeg and deno install through winget.
+On first launch the Settings tab lists anything that is missing, by what it does: the
+Downloader (yt-dlp), the Converter (FFmpeg) and the YouTube helper (deno or Node.js). yt-dlp
+installs with one click (through pip, into the same Python). On Windows, FFmpeg and deno install
+through winget, Windows' app installer. Before you install or update anything, a box says in
+plain words what will happen, including that winget accepts its terms for you. Automatic yt-dlp
+updates, if you turn them on, don't ask.
 
 ## The tabs
 
@@ -80,13 +88,14 @@ the Settings tab:
   conversions until it is updated*. A missing yt-dlp or FFmpeg always blocks, because the job
   can't run without it.
 - **yt-dlp channel:** stable, or nightly, where fixes for site changes arrive days sooner.
-- **Update yt-dlp automatically** when a new version is out. Off by default.
+- **Update yt-dlp automatically** when a new version is out, or install it when it is missing,
+  without asking first. Off by default.
 - **Check for updates on startup.** On by default.
 - **Offline:** if the online check fails, the last known answer is used. With no known
   answer, yt-dlp still counts as out of date once its version (a release date) passes the
   age you set.
-- **JavaScript runtime:** yt-dlp needs one to solve YouTube's challenges. The choices are
-  automatic, deno, Node.js, or off.
+- **YouTube helper:** yt-dlp needs a JavaScript runtime to solve YouTube's challenges. The
+  choices are automatic, deno, Node.js, or off.
 
 Settings are saved in `%APPDATA%\Tapewright\settings.json` (Windows),
 `~/Library/Application Support/Tapewright` (macOS) or `~/.config/tapewright` (Linux). Set
@@ -107,6 +116,7 @@ tapewright/procs.py         child processes: environment, output lines, killing 
 tapewright/versions.py      comparing version strings from four projects
 tapewright/config.py        the settings file
 tapewright/help_content.py  every word the Help tab says
+tapewright/launch.py        starting up, and explaining a Python that can't run the app
 tapewright/app.py           the window and the gates between checks, updates and conversions
 tapewright/theme.py         every color and font, and the code that applies the VCR look
 tapewright/convert_tab.py   the To MP3 and To MP4 tabs
@@ -114,12 +124,15 @@ tapewright/deck.py          the cassette and display that show a conversion runn
 tapewright/settings_tab.py  the Settings tab
 tapewright/help_tab.py      the Help tab
 tapewright/widgets.py       the log view, the banner, the warning dialog and the edit menu
-tests/test_core.py          everything that needs no window and no network
+tests/test_core.py          everything that needs no network and no installed tools
 ```
 
 ```
 python -m unittest discover -s tests -v
 ```
+
+GitHub Actions runs the same tests on every push, on Windows and Linux with Python 3.10 and
+3.14 (`.github/workflows/test.yml`).
 
 Read [AGENTS.md](AGENTS.md) before changing anything in `jobs.py`, `procs.py` or `deps.py`.
 Each rule in it exists because breaking it failed quietly.

@@ -24,6 +24,10 @@ ACTION_LABELS = {
     "diagnostics": "Copy details for my helper",
 }
 
+# The update log's last line after a batch nobody cancelled. app.py logs it and the Help tab tells
+# people to wait for it, so it is spelled once, here.
+UPDATES_FINISHED = "Finished updating"
+
 COPY = "hold down <Ctrl> and press <C>"
 PASTE = "hold down <Ctrl> and press <V>"
 
@@ -170,14 +174,21 @@ TOPICS = [
     {
         "title": "What is the red warning?",
         "blocks": [
-            ("p", "Tapewright uses a few helper programs to do its work. Their names are yt-dlp, "
-                  "FFmpeg and deno. Websites change often, so the helpers need updating from time "
-                  "to time. The red bar means at least one of them is out of date."),
+            ("p", "Tapewright uses three helper programs to do its work: the Downloader (yt-dlp), "
+                  "the Converter (FFmpeg) and the YouTube helper (deno or Node.js). Websites change "
+                  "often, so the helpers need updating from time to time. The red bar means at "
+                  "least one of them is out of date or missing."),
             ("steps", [
                 "Click [Open Settings] on the red bar.",
                 "Click [Update everything out of date].",
-                "A small box asks whether to run the update. Click Yes.",
-                "Wait until the log at the bottom of the Settings tab says done, then try again.",
+                "A small box says what will be updated and where it comes from. Click Yes.",
+                f"Wait until the log at the bottom of the Settings tab says {UPDATES_FINISHED}, "
+                "then try again.",
+                "If the log says to try again later, the newest version isn't ready yet, and you "
+                "can still convert. When the warning box appears, click [Convert anyway]. If that "
+                "button isn't there and nothing in the box says Missing, click [Cancel], click the "
+                "[Settings] tab, choose [Warn before every conversion], and start the conversion "
+                "again. Anything marked Missing has to be installed first.",
             ]),
             ("tip", "If you start a conversion while something is out of date, a warning box "
                     "appears first. [Update now] is the safe choice. [Convert anyway] may still "

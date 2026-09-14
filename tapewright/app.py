@@ -15,7 +15,7 @@ import tkinter as tk
 import traceback
 from tkinter import messagebox, ttk
 
-from tapewright import APP_NAME, __version__, config, deps, procs, theme, widgets
+from tapewright import APP_NAME, __version__, config, deps, help_content, launch, procs, theme, widgets
 from tapewright.convert_tab import ConvertTab
 from tapewright.help_tab import HelpTab
 from tapewright.settings_tab import SettingsTab
@@ -34,6 +34,7 @@ class App:
         self._after_check = []        # callbacks waiting on the check in progress
         self._update_queue = []
         self._update_runner = None
+        self._update_cancelled = False
         self._auto_updated = False
         self._recheck_online = None   # a check asked for while another was running
         self._events = queue.Queue()
@@ -160,7 +161,7 @@ class App:
             return
         if self.updating:
             tab.start_declined()
-            self.inform(APP_NAME, f"{self.deps[self.updating].name} is being updated. "
+            self.inform(APP_NAME, f"The {self.deps[self.updating].label} is being updated. "
                                   "Start again when that finishes.")
             return
         if self.checking:
@@ -183,7 +184,7 @@ class App:
                 tab.start_declined()
                 return
             tab.log("Starting anyway, although " + "; ".join(
-                f"{d.name} is {deps.STATE_LABELS[d.state].lower()}" for d in problems) + ".")
+                f"the {d.label} is {deps.STATE_LABELS[d.state].lower()}" for d in problems) + ".")
         self.active_jobs.add(tab)
         self.settings_tab.on_busy_changed()
         start()
@@ -203,20 +204,26 @@ class App:
                                   "updating: replacing a tool while it is in use can break both.")
             return False
         if self.updating:
-            self.inform(APP_NAME, f"{self.deps[self.updating].name} is already being updated.")
+            self.inform(APP_NAME, f"The {self.deps[self.updating].label} is already being updated.")
             return False
         if confirm:
-            plan = "\n\n".join(f"{d.action or 'Update'} {d.name}:\n{procs.format_command(d.command)}"
-                               for d in todo)
-            if not self.confirm(APP_NAME, f"Run this now?\n\n{plan}"):
+            # Plain words here; the exact commands go to the update log as each one starts.
+            plan = "\n\n".join(deps.describe_update(d) for d in todo)
+            if not self.confirm(APP_NAME, f"{plan}\n\nThe update log on the Settings tab shows each "
+                                          "step as it happens.\n\nGo ahead?"):
                 return False
         self.show_settings()
         self._update_queue = list(todo)
+        self._update_cancelled = False
         self._next_update()
         return True
 
     def _next_update(self):
         if not self._update_queue:
+            if self.updating and not self._update_cancelled:
+                # Each tool logs its own "done", so the end of the whole batch needs a line too:
+                # the Help tab tells people to wait for this one before converting.
+                self.settings_tab.log(help_content.UPDATES_FINISHED + ".")
             self.updating = None
             self._update_runner = None
             self.settings_tab.on_busy_changed()
@@ -227,7 +234,7 @@ class App:
         runner = procs.Runner()
         self.updating, self._update_runner = dep.key, runner
         self.settings_tab.on_busy_changed()
-        self.settings_tab.log(f"{dep.action or 'Update'} {dep.name}")
+        self.settings_tab.log(f"{dep.action or 'Update'}: {dep.label}")
         self.settings_tab.log("$ " + procs.format_command(dep.command))
 
         def work():
@@ -243,20 +250,27 @@ class App:
 
     def _update_finished(self, dep, code, error):
         if error == "cancelled":
-            self.settings_tab.log(f"{dep.name}: update cancelled. It may be half-installed; "
+            self.settings_tab.log(f"{dep.label}: update cancelled. It may be half-installed; "
                                   "run the update again.")
             self._update_queue.clear()
+            self._update_cancelled = True
         elif error:
-            self.settings_tab.log(f"{dep.name}: {error}")
+            self.settings_tab.log(f"{dep.label}: {error}")
         elif code == 0:
-            self.settings_tab.log(f"{dep.name}: done.")
+            self.settings_tab.log(f"{dep.label}: done.")
         else:
-            self.settings_tab.log(f"{dep.name}: the command exited with code {code}; its output is above.")
+            self.settings_tab.log(f"{dep.label}: {deps.update_failure_text(dep, code)}")
         self._next_update()
 
     def cancel_update(self):
         runner = self._update_runner
         if runner is not None:
+            if self._update_queue:
+                # Said here, because the tool running now may already have finished: its "done"
+                # would otherwise be followed by "Finished updating" for a batch that wasn't.
+                self.settings_tab.log("Update cancelled. Not updated: " + ", ".join(
+                    f"the {d.label}" for d in self._update_queue) + ".")
+                self._update_cancelled = True
             self._update_queue.clear()
             threading.Thread(target=runner.cancel, daemon=True).start()
 
@@ -264,8 +278,8 @@ class App:
 
     def on_close(self):
         if self.updating:
-            name = self.deps[self.updating].name
-            if not self.confirm(APP_NAME, f"{name} is still being updated. Quitting now can leave it "
+            label = self.deps[self.updating].label
+            if not self.confirm(APP_NAME, f"The {label} is still being updated. Quitting now can leave it "
                                           "half-installed and broken.\n\nQuit anyway?"):
                 return
         elif self.active_jobs:
@@ -295,9 +309,15 @@ def _enable_dpi_awareness():
 
 
 def main():
+    """Open the window. Start through launch.main(), which first checks this Python can run it."""
     _enable_dpi_awareness()
     settings = config.Settings()
     settings.load()
-    root = tk.Tk()
+    try:
+        root = tk.Tk()
+    except tk.TclError as e:  # tkinter imported, but Tcl/Tk itself is broken, or there is no display
+        launch.explain(f"Tkinter couldn't open a window ({e}).", launch.tk_failure_fix(str(e)))
+        return 1
     App(root, settings)
     root.mainloop()
+    return 0

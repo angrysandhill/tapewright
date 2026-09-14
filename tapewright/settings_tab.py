@@ -17,7 +17,7 @@ STATE_COLORS = {
 ROWS = (
     ("yt-dlp", "yt-dlp", "Downloads from links."),
     ("ffmpeg", "FFmpeg", "Converts and merges. Every conversion uses it."),
-    ("js", "JavaScript runtime", "Lets yt-dlp answer YouTube's challenges."),
+    ("js", "deno or Node.js", "Lets yt-dlp answer YouTube's challenges."),
 )
 JS_LABELS = {"auto": "Automatic (deno, else Node.js)", "deno": "deno", "node": "Node.js", "none": "Off"}
 _SPINNER = re.compile(r"^\s*[-\\|/]\s*$")  # winget's progress spinner, one frame per line
@@ -59,19 +59,20 @@ class SettingsTab(ttk.Frame):
                                        command=lambda: self.app.recheck(True))
         self.check_button.grid(row=0, column=3, padx=(8, 0))
 
-        for i, (key, name, role) in enumerate(ROWS):
+        for i, (key, name, summary) in enumerate(ROWS):
             r = 1 + i * 2
-            name_label = ttk.Label(tools, text=name, font=theme.FONTS["display"])
+            name_label = ttk.Label(tools, text=deps.Dep(key, name, False).label, font=theme.FONTS["display"])
             name_label.grid(row=r, column=0, sticky="w", padx=(0, 16))
-            state = tk.Label(tools, text="Checking…", anchor="w", font=theme.FONTS["small"])
+            state = tk.Label(tools, text="Checking…", anchor="w", justify="left", font=theme.FONTS["small"])
             state.grid(row=r, column=1, sticky="w")
             action = ttk.Button(tools, text="Update", command=lambda k=key: self.app.run_updates([k]))
             action.grid(row=r, column=2, sticky="e")
             action.grid_remove()
-            detail = ttk.Label(tools, text=role, foreground=theme.C["text_dim"], justify="left")
+            detail = ttk.Label(tools, text=summary, foreground=theme.C["text_dim"], justify="left")
             detail.grid(row=r + 1, column=0, columnspan=3, sticky="w", pady=(2, 10))
             self.rows[key] = {"name": name_label, "state": state, "action": action, "detail": detail}
-        tools.bind("<Configure>", self._rewrap)
+        self.tools = tools
+        tools.bind("<Configure>", lambda e: self._rewrap())
 
         policy = ttk.LabelFrame(self, text="Keeping them up to date", padding=10)
         policy.grid(row=1, column=0, sticky="ew", pady=12)
@@ -97,7 +98,7 @@ class SettingsTab(ttk.Frame):
         ttk.Label(offline, text="days old").pack(side="left")
         self.days.trace_add("write", self._days_changed)
 
-        ttk.Label(policy, text="JavaScript runtime:").grid(row=6, column=0, sticky="w", pady=3, padx=(0, 8))
+        ttk.Label(policy, text="YouTube helper:").grid(row=6, column=0, sticky="w", pady=3, padx=(0, 8))
         self.js_box = ttk.Combobox(policy, state="readonly", values=list(JS_LABELS.values()), width=34)
         self.js_box.set(JS_LABELS.get(s["js_runtime"], JS_LABELS["auto"]))
         self.js_box.grid(row=6, column=1, sticky="w")
@@ -111,9 +112,21 @@ class SettingsTab(ttk.Frame):
         self.logview = widgets.LogView(self, height=8)
         self.logview.grid(row=3, column=0, sticky="nsew", pady=(4, 0))
 
-    def _rewrap(self, event):
+    def _rewrap(self):
+        """Wrap each row's words to the room they have.
+
+        The state line shares its row with the name and the button, so it gets the room they leave;
+        otherwise a long state runs under the button in the narrowest window. Redone when a name or
+        a button's text changes, not only on a resize.
+        """
+        width = self.tools.winfo_width()
+        if width <= 1:  # not laid out yet; the first <Configure> comes back here
+            return
+        names = max(row["name"].winfo_reqwidth() for row in self.rows.values())
+        buttons = max(row["action"].winfo_reqwidth() for row in self.rows.values())
         for row in self.rows.values():
-            row["detail"].configure(wraplength=max(event.width - 40, 200))
+            row["detail"].configure(wraplength=max(width - 40, 200))
+            row["state"].configure(wraplength=max(width - names - buttons - 60, 150))
 
     def _check(self, parent, row, text, key, recheck):
         var = tk.BooleanVar(value=self.app.settings[key])
@@ -167,7 +180,7 @@ class SettingsTab(ttk.Frame):
             d = self.app.deps.get(key)
             if d is None:
                 continue
-            row["name"].configure(text=d.name)
+            row["name"].configure(text=d.label)
             bits = [deps.STATE_LABELS[d.state]]
             if d.installed:
                 bits.append(f"installed {d.installed}")
@@ -189,7 +202,7 @@ class SettingsTab(ttk.Frame):
     def on_busy_changed(self):
         self._refresh_buttons()
         if self.app.updating:
-            self.check_status.configure(text=f"Updating {self.app.deps[self.app.updating].name}…")
+            self.check_status.configure(text=f"Updating the {self.app.deps[self.app.updating].label}…")
 
     def _refresh_buttons(self):
         busy = bool(self.app.updating or self.app.active_jobs or self.app.checking)
@@ -209,6 +222,7 @@ class SettingsTab(ttk.Frame):
             self.cancel_update_button.grid()
         else:
             self.cancel_update_button.grid_remove()
+        self._rewrap()
 
     def update_all(self):
         fixable = [d.key for d in self.app.deps.values() if d.state in deps.PROBLEMS and d.command]
