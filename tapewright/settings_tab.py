@@ -5,7 +5,9 @@
 import datetime
 import platform
 import re
+import sys
 import tkinter as tk
+import webbrowser
 from tkinter import ttk
 
 from tapewright import APP_NAME, __version__, deps, procs, theme, versions, widgets
@@ -14,11 +16,8 @@ STATE_COLORS = {
     deps.OK: theme.C["ok"], deps.OUTDATED: theme.C["error"], deps.MISSING: theme.C["error"],
     deps.UNSUPPORTED: theme.C["error"], deps.UNKNOWN: theme.C["warn"],
 }
-ROWS = (
-    ("yt-dlp", "yt-dlp", "Downloads from links."),
-    ("ffmpeg", "FFmpeg", "Converts and merges. Every conversion uses it."),
-    ("js", "deno or Node.js", "Lets yt-dlp answer YouTube's challenges."),
-)
+# (key, name before the first check). Each row's summary, until then, is deps.ABOUT[key].
+ROWS = (("yt-dlp", "yt-dlp"), ("ffmpeg", "FFmpeg"), ("js", "deno or Node.js"))
 JS_LABELS = {"auto": "Automatic (deno, else Node.js)", "deno": "deno", "node": "Node.js", "none": "Off"}
 _SPINNER = re.compile(r"^\s*[-\\|/]\s*$")  # winget's progress spinner, one frame per line
 RECHECK_DELAY_MS = 800
@@ -59,7 +58,7 @@ class SettingsTab(ttk.Frame):
                                        command=lambda: self.app.recheck(True))
         self.check_button.grid(row=0, column=3, padx=(8, 0))
 
-        for i, (key, name, summary) in enumerate(ROWS):
+        for i, (key, name) in enumerate(ROWS):
             r = 1 + i * 2
             name_label = ttk.Label(tools, text=deps.Dep(key, name, False).label, font=theme.FONTS["display"])
             name_label.grid(row=r, column=0, sticky="w", padx=(0, 16))
@@ -68,8 +67,8 @@ class SettingsTab(ttk.Frame):
             action = ttk.Button(tools, text="Update", command=lambda k=key: self.app.run_updates([k]))
             action.grid(row=r, column=2, sticky="e")
             action.grid_remove()
-            detail = ttk.Label(tools, text=summary, foreground=theme.C["text_dim"], justify="left")
-            detail.grid(row=r + 1, column=0, columnspan=3, sticky="w", pady=(2, 10))
+            detail = ttk.Label(tools, text=deps.ABOUT[key], foreground=theme.C["text_dim"], justify="left")
+            detail.grid(row=r + 1, column=0, columnspan=3, sticky="w", pady=(2, 8))
             self.rows[key] = {"name": name_label, "state": state, "action": action, "detail": detail}
         self.tools = tools
         tools.bind("<Configure>", lambda e: self._rewrap())
@@ -88,7 +87,7 @@ class SettingsTab(ttk.Frame):
                       ("block", "Block conversions until it is updated")),
                      None)
 
-        ttk.Label(policy, text="Offline:").grid(row=5, column=0, sticky="w", pady=3, padx=(0, 8))
+        ttk.Label(policy, text="Offline:").grid(row=5, column=0, sticky="w", pady=2, padx=(0, 8))
         offline = ttk.Frame(policy)
         offline.grid(row=5, column=1, sticky="w")
         intro = "If the online check fails, treat yt-dlp as out of date once it is"
@@ -98,7 +97,7 @@ class SettingsTab(ttk.Frame):
         ttk.Label(offline, text="days old").pack(side="left")
         self.days.trace_add("write", self._days_changed)
 
-        ttk.Label(policy, text="YouTube helper:").grid(row=6, column=0, sticky="w", pady=3, padx=(0, 8))
+        ttk.Label(policy, text="YouTube helper:").grid(row=6, column=0, sticky="w", pady=2, padx=(0, 8))
         self.js_box = ttk.Combobox(policy, state="readonly", values=list(JS_LABELS.values()), width=34)
         self.js_box.set(JS_LABELS.get(s["js_runtime"], JS_LABELS["auto"]))
         self.js_box.grid(row=6, column=1, sticky="w")
@@ -107,8 +106,22 @@ class SettingsTab(ttk.Frame):
 
         bottom = ttk.Frame(self)
         bottom.grid(row=2, column=0, sticky="ew")
-        ttk.Label(bottom, text="Update log").pack(side="left")
+        # The buttons are packed first, so on a narrow window the words beside them give way, not the buttons.
         ttk.Button(bottom, text="Copy diagnostics", command=self.copy_diagnostics).pack(side="right")
+        # Down here rather than beside Check for updates, which already shares its row with two buttons
+        # and the check's summary in the narrowest window.
+        self.setup_button = ttk.Button(bottom, text="Run setup again", command=self.app.request_setup)
+        self.setup_button.pack(side="right", padx=(0, 8))
+        self.log_caption = ttk.Label(bottom, text="Update log")
+        self.log_caption.pack(side="left")
+        # Shown in the caption's place while a newer Tapewright is out. A row of its own would push the bottom
+        # of the update log, where "Finished updating." appears, out of the default window. It is never a
+        # tool row: nothing about it gates anything.
+        self.release = ttk.Frame(bottom)
+        self.release_label = ttk.Label(self.release, font=theme.FONTS["display"], foreground=theme.C["vfd"])
+        self.release_label.pack(side="left")
+        ttk.Button(self.release, text="Open the download page",
+                   command=self.open_release_page).pack(side="left", padx=(12, 0))
         self.logview = widgets.LogView(self, height=8)
         self.logview.grid(row=3, column=0, sticky="nsew", pady=(4, 0))
 
@@ -131,11 +144,12 @@ class SettingsTab(ttk.Frame):
     def _check(self, parent, row, text, key, recheck):
         var = tk.BooleanVar(value=self.app.settings[key])
         box = ttk.Checkbutton(parent, text=text, variable=var)
-        box.grid(row=row, column=0, columnspan=2, sticky="w", pady=3)
+        # 2 px between the policy rows, not more: seven of them, and the update log below needs the room.
+        box.grid(row=row, column=0, columnspan=2, sticky="w", pady=2)
         var.trace_add("write", lambda *_: self._changed(key, var.get(), recheck))
 
     def _radios(self, parent, row, label, key, options, recheck):
-        ttk.Label(parent, text=label).grid(row=row, column=0, sticky="w", pady=3, padx=(0, 8))
+        ttk.Label(parent, text=label).grid(row=row, column=0, sticky="w", pady=2, padx=(0, 8))
         var = tk.StringVar(value=self.app.settings[key])
         frame = ttk.Frame(parent)
         frame.grid(row=row, column=1, sticky="w")
@@ -191,13 +205,24 @@ class SettingsTab(ttk.Frame):
             # Copy diagnostics, where a bug report needs them.
             text = d.detail
             if d.how:
-                text += ("  " if text else "") + f"Updates with: {d.how}."
+                # Some are whole sentences already, and "installed it.." reads as a typo.
+                text += ("  " if text else "") + f"Updates with: {d.how.rstrip('.')}."
             row["detail"].configure(text=text)
         problems = [d for d in self.app.deps.values() if d.state in deps.PROBLEMS]
         summary = "Everything is up to date." if not problems else (
             f"{len(problems)} need{'s' if len(problems) == 1 else ''} attention.")
         self.check_status.configure(text=f"Checked at {datetime.datetime.now():%H:%M}. {summary}")
         self._refresh_buttons()
+
+    def on_release_changed(self):
+        release = self.app.release
+        if release:
+            self.release_label.configure(text=f"Tapewright {release['version']} is out.")
+            self.log_caption.pack_forget()
+            self.release.pack(side="left")
+        else:
+            self.release.pack_forget()
+            self.log_caption.pack(side="left")
 
     def on_busy_changed(self):
         self._refresh_buttons()
@@ -218,8 +243,14 @@ class SettingsTab(ttk.Frame):
         fixable = any(d.state in deps.PROBLEMS and d.command for d in self.app.deps.values())
         self.update_all_button.state(["disabled"] if busy or not fixable else ["!disabled"])
         self.check_button.state(["disabled"] if self.app.checking or self.app.updating else ["!disabled"])
+        # Refused only where App.request_setup refuses it: over a conversion that runs or waits to start.
+        # During an update it opens on the batch, which the screen follows whoever started it, and this is
+        # the tab "Hide this page" lands on.
+        self.setup_button.state(["disabled"] if self.app.converting() else ["!disabled"])
         if self.app.updating:
             self.cancel_update_button.grid()
+            # Not while the fetcher puts a helper in place (see App.update_swapping).
+            self.cancel_update_button.state(["disabled"] if self.app.update_swapping else ["!disabled"])
         else:
             self.cancel_update_button.grid_remove()
         self._rewrap()
@@ -228,11 +259,20 @@ class SettingsTab(ttk.Frame):
         fixable = [d.key for d in self.app.deps.values() if d.state in deps.PROBLEMS and d.command]
         self.app.run_updates(fixable)
 
+    def open_release_page(self):
+        if self.app.release:
+            webbrowser.open(self.app.release["url"])
+
     def log(self, text):
         for line in str(text).splitlines() or [""]:
             self.logview.append(line)
 
     def log_tool_line(self, line):
+        parsed = deps.parse_fetch_line(line)
+        if parsed and parsed[0] == "progress":
+            return  # twice a second through a whole download; the setup screen's bar shows it instead
+        if parsed and parsed[0] == "step":
+            line = parsed[1]
         if line.strip() and not _SPINNER.match(line):
             self.logview.append(line)
 
@@ -240,10 +280,14 @@ class SettingsTab(ttk.Frame):
         s = self.app.settings
         lines = [f"{APP_NAME} {__version__}",
                  f"Python {platform.python_version()} ({procs.python_exe()})",
+                 f"Started by {sys.executable}; "
+                 f"the installer's own Python: {'yes' if procs.bundled() else 'no'}",
+                 f"Tk {self.tk.call('info', 'patchlevel')}",
                  platform.platform()]
         for d in self.app.deps.values():
             lines.append(f"{d.name}: {d.state}; installed {d.installed or '-'}; "
                          f"latest {d.latest or '-'}; at {d.path or '-'}")
+        lines.append(f"Tapewright's own helpers: {deps.tools_dir() or '-'}")
         lines.append(f"channel={s['ytdlp_channel']} extras={s['ytdlp_extras']} "
                      f"policy={s['outdated_policy']} js={s['js_runtime']}")
         text = "\n".join(lines)

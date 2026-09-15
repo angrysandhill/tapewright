@@ -22,6 +22,10 @@ ACTION_LABELS = {
     "mp4_folder": "Open the folder with my MP4s",
     "check_updates": "Check for updates now",
     "diagnostics": "Copy details for my helper",
+    "setup": "Run setup again",
+    "tools_folder": "Open the helpers folder",
+    "ffmpeg_page": "Open the FFmpeg download page",
+    "deno_page": "Open the deno download page",
 }
 
 # The update log's last line after a batch nobody cancelled. app.py logs it and the Help tab tells
@@ -49,6 +53,37 @@ TOPICS = [
                     "common, so phones and computers can usually play them."),
         ],
         "actions": ["mp3", "mp4"],
+    },
+    {
+        "title": "Setting up Tapewright",
+        "blocks": [
+            ("p", "Tapewright uses three free helper programs. The first time it opens, a page called "
+                  "Let's get Tapewright ready shows which of them this computer already has, and installs "
+                  "the rest."),
+            ("steps", [
+                "Click [Install them now]. If some helpers are already there, the button says "
+                "[Install the missing ones] instead.",
+                "Wait while the helpers download and install, one after another. The bar under each one "
+                "shows how far it has got. This can take a few minutes.",
+                "When the page says All set!, click [Start using Tapewright].",
+            ]),
+            ("list", [
+                "To stop, click [Cancel]. A download that was stopped is never used, but a helper stopped "
+                "while it was installing may be half-installed, so install it again before you convert.",
+                "[Hide this page] brings back the tabs while the helpers go on installing. To see the page "
+                "again, click the button below that says Run setup again.",
+                "If a helper didn't install, the words under its name turn red and say why. Click "
+                "[Try again], or click [Help with this] to read what else you can do.",
+                "[Not now] skips the page. To come back to it, click the [Settings] tab, then click "
+                "[Run setup again].",
+                "[Show details] shows every step as it happens, which is useful when someone is helping you.",
+            ]),
+            ("tip", "You don't need an administrator password. When the page installs the Converter or "
+                    "the YouTube helper, it downloads them from their official releases on github.com, "
+                    "checks them, and keeps them in Tapewright's own folder. The Downloader is added to the "
+                    "Python that runs Tapewright."),
+        ],
+        "actions": ["setup"],
     },
     {
         "title": "Make music (MP3) from a link",
@@ -197,6 +232,36 @@ TOPICS = [
         "actions": ["settings"],
     },
     {
+        "title": "A helper won't install",
+        "blocks": [
+            ("p", "The red words under the helper's name say what went wrong. Try these, one at a time:"),
+            ("steps", [
+                "Check your internet: can you open a website in your browser?",
+                "Click [Try again]. If that page is gone, click the [Settings] tab, then [Run setup again].",
+                "If the words say Windows stopped a program from running, this computer only allows programs "
+                "that have been approved. Ask whoever looks after the computer to help.",
+            ]),
+            ("p", "You can also put the Converter (FFmpeg) in place yourself. It takes a few minutes:"),
+            ("steps", [
+                "Click the button below that says Open the FFmpeg download page. Under release builds, click "
+                "ffmpeg-release-essentials.zip, and your browser downloads it.",
+                "When it has downloaded, open it: click it where your browser shows the download, or "
+                "double-click it in your Downloads folder. Inside is a folder. Double-click that, then "
+                "double-click its bin folder.",
+                "Click the button below that says Open the helpers folder, then double-click the ffmpeg "
+                "folder in it.",
+                "Copy ffmpeg and ffprobe from the bin folder (they may be called ffmpeg.exe and "
+                f"ffprobe.exe): click one, hold down <Ctrl> and click the other, then {COPY}. Click inside "
+                f"the ffmpeg folder, then {PASTE}.",
+                "Come back to Tapewright and click the button below that says Check for updates now.",
+            ]),
+            ("p", "The YouTube helper (deno) goes in the same way. On the deno download page, download "
+                  "deno-x86_64-pc-windows-msvc.zip, then copy the deno file inside it, which may be called "
+                  "deno.exe, into the deno folder."),
+        ],
+        "actions": ["ffmpeg_page", "deno_page", "tools_folder", "check_updates"],
+    },
+    {
         "title": "Something went wrong",
         "blocks": [
             ("p", "The red words under the tape say what the problem was. If a conversion had "
@@ -230,6 +295,22 @@ TOPICS = [
             ]),
         ],
         "actions": ["mp4"],
+    },
+    {
+        "title": "Updating Tapewright",
+        "blocks": [
+            ("p", "When a newer Tapewright is out, the [Settings] tab says so just above the log at its "
+                  "bottom, beside an [Open the download page] button."),
+            ("steps", [
+                "Click the [Settings] tab.",
+                "Click [Open the download page]. Your web browser opens the page with the new version.",
+                "Follow the steps on that page. Your settings are kept, and if a helper needs installing "
+                "again afterwards, Tapewright offers to do it.",
+            ]),
+            ("tip", "Tapewright asks about new versions at most once a day, when it checks for updates, so a "
+                    "new version can take a day to show up here."),
+        ],
+        "actions": ["settings"],
     },
     {
         "title": "Copy, paste and other basics",

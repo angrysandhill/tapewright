@@ -108,6 +108,9 @@ def apply(root):
         osd=tkfont.Font(root, family=mono, size=13, weight="bold"),
         small=tkfont.Font(root, family=mono, size=9, weight="bold"),
         hand=tkfont.Font(root, family=hand, size=11, weight="bold"),
+        # The setup screen is read by someone who has never seen the app, so it is bigger than the tabs.
+        heading=tkfont.Font(root, family=display, size=18),
+        body=tkfont.Font(root, family=ui, size=11),
     )
 
     c = C
@@ -166,6 +169,8 @@ def apply(root):
     style.configure("TScrollbar", background=c["key"], troughcolor=c["field"], bordercolor=c["edge"],
                     lightcolor=c["key_hi"], darkcolor=c["key_down"], arrowcolor=c["text_dim"])
     style.map("TScrollbar", background=[("pressed", c["key_hi"]), ("active", c["key_hi"])])
+    # The display's aqua filling a dark well. clam draws the bar in -background and the well in -troughcolor.
+    style.configure("TProgressbar", background=c["vfd"], troughcolor=c["field"], bordercolor=c["edge"])
 
     # Patterns name classic widget classes. A bare "*Background" would also reach ttk widgets,
     # which read it as a widget option that overrides their style's state maps.

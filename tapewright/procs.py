@@ -20,6 +20,8 @@ WINDOWS = os.name == "nt"
 _NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 _NEW_GROUP = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
 _EOL = re.compile(rb"\r\n|\r|\n")
+# The Windows installer writes this beside the python.exe it brings, and nothing else would.
+RUNTIME_MARKER = "tapewright-runtime.txt"
 
 
 class Cancelled(Exception):
@@ -41,6 +43,11 @@ def python_exe():
     return str(exe)
 
 
+def bundled():
+    """True when this is the private Python the Windows installer brought along for Tapewright."""
+    return bool(sys.executable) and (Path(sys.executable).parent / RUNTIME_MARKER).is_file()
+
+
 def child_env(extra_path=()):
     env = dict(os.environ)
     # yt-dlp is a Python child writing to a pipe. Left on Windows' ANSI code page it drops
@@ -52,6 +59,14 @@ def child_env(extra_path=()):
     # A Python child writing to a pipe block-buffers: progress would arrive all at once, at
     # the end, which looks exactly like a hang.
     env["PYTHONUNBUFFERED"] = "1"
+    if bundled():
+        # The installer's Python belongs to Tapewright alone, so its children must see only its own
+        # packages. A PYTHONHOME or PYTHONPATH left behind by other software could stop them starting,
+        # or let a yt-dlp from another Python, or from the user's own site-packages, answer
+        # `python -m yt_dlp` in place of the one the Settings tab installs and updates.
+        env.pop("PYTHONHOME", None)
+        env.pop("PYTHONPATH", None)
+        env["PYTHONNOUSERSITE"] = "1"
     dirs = [str(d) for d in extra_path if d]
     if dirs:
         env["PATH"] = os.pathsep.join(dirs + [env.get("PATH", "")])
@@ -163,11 +178,23 @@ class Runner:
         if popen is not None:
             kill_tree(popen)
 
+    def wait(self, timeout):
+        """Wait up to timeout seconds for the process running now to end. True when none is left running."""
+        with self._lock:
+            popen = self._popen
+        if popen is None:
+            return True
+        try:
+            popen.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            return False
+        return True
+
     def run(self, args, on_line):
         """Run args to completion, passing each output line to on_line. Returns the exit code.
 
-        Raises Cancelled if the job was cancelled before or during the run, and RuntimeError
-        if the program could not be started at all.
+        Raises Cancelled if the job was cancelled before the run, or during it unless the
+        program exited 0, and RuntimeError if the program could not be started at all.
         """
         args = [str(a) for a in args]
         with self._lock:
@@ -189,6 +216,8 @@ class Runner:
             popen.stdout.close()
             with self._lock:
                 self._popen = None
-        if self._cancelled:
+        # A killed process never exits 0, so a 0 here means it finished before the kill could land.
+        # Calling that cancelled would report a finished install as one that never happened.
+        if self._cancelled and code != 0:
             raise Cancelled()
         return code

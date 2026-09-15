@@ -33,8 +33,13 @@ class LogView(ttk.Frame):
         self.columnconfigure(0, weight=1)
         self.rowconfigure(0, weight=1)
         self._dropped = 0
+        # Other logs that show every line this one does, such as the setup screen's details under the
+        # Settings tab's update log. Each keeps and trims its own copy.
+        self.followers = []
 
     def append(self, line):
+        for follower in self.followers:
+            follower.append(line)
         follow = self.text.yview()[1] >= 0.999
         self.text.configure(state="normal")
         self.text.insert("end", line.rstrip("\r\n") + "\n")

@@ -2,17 +2,25 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 """The Help tab: plain-language questions on the left, the answer on the right."""
 
+import os
 import re
+import subprocess
+import sys
 import tkinter as tk
 import tkinter.font as tkfont
+import webbrowser
 from tkinter import ttk
 
-from tapewright import help_content, theme
+from tapewright import deps, help_content, theme
 
 # Past 16 pt the question list, which cannot wrap, leaves the answer a column a few words wide
 # in the default window.
 MIN_SIZE, MAX_SIZE = 9, 16
 _MARKUP = re.compile(r"(\[[^\[\]]+\]|<[^<>]+>)")
+# Where "A helper won't install" sends people to get a helper by hand.
+FFMPEG_PAGE = "https://www.gyan.dev/ffmpeg/builds/"
+DENO_PAGE = "https://github.com/denoland/deno/releases/latest"
+SETUP_REFUSED = "Setup can't open while a conversion is running. Try again when it has finished."
 
 
 class HelpTab(ttk.Frame):
@@ -25,6 +33,10 @@ class HelpTab(ttk.Frame):
         "mp4_folder": "open_mp4_folder",
         "check_updates": "check_updates",
         "diagnostics": "copy_diagnostics",
+        "setup": "run_setup",
+        "tools_folder": "open_tools_folder",
+        "ffmpeg_page": "open_ffmpeg_page",
+        "deno_page": "open_deno_page",
     }
 
     def __init__(self, master, app):
@@ -112,6 +124,14 @@ class HelpTab(ttk.Frame):
         if chosen:
             self.show(chosen[0])
 
+    def show_topic(self, title):
+        """Select and show the topic with this title, as a click on it in the list would."""
+        index = next(i for i, topic in enumerate(help_content.TOPICS) if topic["title"] == title)
+        self.topics.selection_clear(0, "end")
+        self.topics.selection_set(index)
+        self.topics.see(index)
+        self.show(index)
+
     def show(self, index):
         topic = help_content.TOPICS[index]
         t = self.text
@@ -183,3 +203,34 @@ class HelpTab(ttk.Frame):
     def copy_diagnostics(self):
         self.app.settings_tab.copy_diagnostics()
         self.message.set("Copied. Paste it into your message: hold down Ctrl and press V.")
+
+    def run_setup(self):
+        # App refuses while a conversion runs or waits to start, since the page would hide it. Said here,
+        # on the message line under the button, because nothing else on screen would change.
+        if not self.app.request_setup():
+            self.message.set(SETUP_REFUSED)
+
+    def open_tools_folder(self):
+        """Open the folder Tapewright keeps its own helpers in, with the two folders a copy by hand goes in.
+
+        Both are made first, because the answer tells people to open them before anything has been installed.
+        """
+        tools = deps.tools_dir()
+        if tools is None:
+            self.message.set("Tapewright only keeps helpers of its own on Windows.")
+            return
+        try:
+            for name in ("ffmpeg", "deno"):
+                (tools / name).mkdir(parents=True, exist_ok=True)
+            if os.name == "nt":
+                os.startfile(tools)
+            else:
+                subprocess.Popen(["open" if sys.platform == "darwin" else "xdg-open", str(tools)])
+        except OSError as e:
+            self.message.set(f"Couldn't open the helpers folder: {e}")
+
+    def open_ffmpeg_page(self):
+        webbrowser.open(FFMPEG_PAGE)
+
+    def open_deno_page(self):
+        webbrowser.open(DENO_PAGE)

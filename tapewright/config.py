@@ -29,6 +29,8 @@ DEFAULTS = {
     "offline_max_age_days": 60,
     "js_runtime": "auto",
     "latest_cache": {},
+    # The setup screen: True once someone finished it, or the first check found nothing to install
+    "setup_done": False,
     # Conversion tabs
     "mp3_out_dir": "",
     "mp4_out_dir": "",
