@@ -1,0 +1,5 @@
+Tapewright will be installed just for you, in your own user folder. It doesn't need an administrator password and doesn't change anything for other people who use this computer.
+
+It brings its own private copy of Python, the language Tapewright is written in, so it won't touch any Python you already have.
+
+The first time Tapewright opens, it offers to download the helper programs it needs. Nothing is downloaded until you say yes.

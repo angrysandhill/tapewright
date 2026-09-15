@@ -1,0 +1,97 @@
+# SPDX-FileCopyrightText: 2026 AngrySandhill
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# Builds TapewrightSetup.exe with Inno Setup, from python.org's runtime and Tapewright's source. A pushed tag
+# v<version> ends in a draft release, which the maintainer publishes only after installing it by hand on a
+# spare account (the checklist in AGENTS.md). Run workflow builds the same installer as a workflow artifact
+# and releases nothing. Each "python packaging/build.py" step below runs the same way locally.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]  # with no branches filter, a push to a branch doesn't start this
+  workflow_dispatch:
+
+permissions:
+  contents: write      # gh release create
+  id-token: write      # the attestation's signing certificate
+  attestations: write  # storing the attestation
+
+jobs:
+  installer:
+    name: Windows installer
+    runs-on: windows-latest
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      # The runtime ships as python.org built it, so nothing run on it here may leave bytecode in its folder.
+      PYTHONDONTWRITEBYTECODE: "1"
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.14"
+      - name: The tag is this version
+        if: github.event_name == 'push'
+        run: python packaging/build.py check-tag "$env:GITHUB_REF_NAME"
+      - name: Versions
+        id: versions
+        run: python packaging/build.py versions >> $env:GITHUB_OUTPUT
+      - name: Download python.org's runtime
+        run: python packaging/build.py runtime
+      - name: Check the runtime
+        run: python packaging/build.py check
+      - name: Unit tests, on the runtime
+        env:
+          TAPEWRIGHT_CONFIG_DIR: ${{ runner.temp }}\tapewright-config
+          TAPEWRIGHT_TOOLS_DIR: ${{ runner.temp }}\tapewright-tools
+        run: .\build\runtime\python.exe -m unittest discover -s tests -v
+      # Only after the tests, so they ran as a Python someone installed rather than as the installer's own.
+      - name: Mark the runtime as Tapewright's
+        run: python packaging/build.py mark
+      - name: Stage the app
+        run: python packaging/build.py stage
+      - name: Compile the installer
+        env:
+          APP_VERSION: ${{ steps.versions.outputs.app }}
+          PY_VERSION: ${{ steps.versions.outputs.python }}
+        run: |
+          # The image's own Inno Setup 6, never a download. WizardStyle's dark mode arrived in 6.6.0.
+          $iscc = Get-ChildItem "C:\Program Files*\Inno Setup 6\ISCC.exe" -ErrorAction SilentlyContinue |
+            Select-Object -First 1
+          if (-not $iscc) { throw "There is no Inno Setup 6 under Program Files." }
+          $info = $iscc.VersionInfo
+          "Inno Setup $($info.FileVersion) at $($iscc.FullName)"
+          if ([version]::new($info.FileMajorPart, $info.FileMinorPart) -lt [version]"6.6") {
+            throw "Inno Setup $($info.FileVersion) is older than 6.6."
+          }
+          $defines = "/DAppVersion=$env:APP_VERSION", "/DPyVersion=$env:PY_VERSION"
+          & $iscc.FullName @defines packaging\tapewright.iss
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Checksums
+        run: python packaging/build.py sums dist/TapewrightSetup.exe
+      - uses: actions/upload-artifact@v7
+        with:
+          name: TapewrightSetup
+          path: dist/
+          if-no-files-found: error
+      # actions/attest-build-provenance's README says new workflows should use actions/attest, which it wraps.
+      - name: Attest where the installer was built
+        if: github.event_name == 'push'
+        uses: actions/attest@v4
+        with:
+          subject-path: dist/TapewrightSetup.exe
+      # The asset names carry no version, so /releases/latest/download/TapewrightSetup.exe always works.
+      - name: Draft the release
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          APP_VERSION: ${{ steps.versions.outputs.app }}
+        run: >-
+          gh release create "$env:GITHUB_REF_NAME" dist/TapewrightSetup.exe dist/SHA256SUMS.txt
+          --repo "$env:GITHUB_REPOSITORY" --verify-tag --draft --title "Tapewright $env:APP_VERSION"
+          --notes-file packaging/release-notes.md

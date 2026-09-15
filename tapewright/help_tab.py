@@ -37,6 +37,7 @@ class HelpTab(ttk.Frame):
         "tools_folder": "open_tools_folder",
         "ffmpeg_page": "open_ffmpeg_page",
         "deno_page": "open_deno_page",
+        "release_page": "open_release_page",
     }
 
     def __init__(self, master, app):
@@ -234,3 +235,6 @@ class HelpTab(ttk.Frame):
 
     def open_deno_page(self):
         webbrowser.open(DENO_PAGE)
+
+    def open_release_page(self):
+        webbrowser.open(deps.RELEASES_PAGE)

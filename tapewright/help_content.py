@@ -26,6 +26,7 @@ ACTION_LABELS = {
     "tools_folder": "Open the helpers folder",
     "ffmpeg_page": "Open the FFmpeg download page",
     "deno_page": "Open the deno download page",
+    "release_page": "Open the Tapewright download page",
 }
 
 # The update log's last line after a batch nobody cancelled. app.py logs it and the Help tab tells
@@ -300,17 +301,54 @@ TOPICS = [
         "title": "Updating Tapewright",
         "blocks": [
             ("p", "When a newer Tapewright is out, the [Settings] tab says so just above the log at its "
-                  "bottom, beside an [Open the download page] button."),
+                  "bottom, beside an [Open the download page] button. The same page also opens from the "
+                  "button below that says Open the Tapewright download page."),
+            ("p", "These steps are for Tapewright installed on Windows with TapewrightSetup.exe. If you "
+                  "started Tapewright from its source code, which is the only way on a Mac or on Linux, "
+                  "don't download TapewrightSetup.exe: get the new source code the same way you got it the "
+                  "first time, as Tapewright's page on github.com explains."),
             ("steps", [
-                "Click the [Settings] tab.",
-                "Click [Open the download page]. Your web browser opens the page with the new version.",
-                "Follow the steps on that page. Your settings are kept, and if a helper needs installing "
-                "again afterwards, Tapewright offers to do it.",
+                "Click the [Settings] tab, then click [Open the download page]. Your web browser opens the "
+                "page with the new version.",
+                "Under Assets on that page, click TapewrightSetup.exe, and your browser downloads it. "
+                "If your browser says the file isn't commonly downloaded, choose Keep. Some browsers put "
+                "Keep in a menu behind three dots beside the download.",
+                "Open it: click it where your browser shows the download, or double-click it in your "
+                "Downloads folder. If Windows warns you about it, click Windows warned me about it in the "
+                "list of questions on the left.",
+                "If Setup says Tapewright is running, close Tapewright's window, which closes this page too, "
+                "then click OK. After that, click through Setup's pages. Nothing on them needs changing.",
             ]),
-            ("tip", "Tapewright asks about new versions at most once a day, when it checks for updates, so a "
-                    "new version can take a day to show up here."),
+            ("tip", "Your settings and helpers are kept, and if a helper ever needs installing again, "
+                    "Tapewright offers to do it. Tapewright looks for new versions about once a day, so a "
+                    "new version can take a day to show up on the [Settings] tab."),
         ],
-        "actions": ["settings"],
+        "actions": ["settings", "release_page"],
+    },
+    {
+        "title": "Windows warned me about it",
+        "blocks": [
+            ("p", "When you open TapewrightSetup.exe, the program that installs Tapewright, Windows may show "
+                  "a blue box that says Windows protected your PC. If the file came from Tapewright's own "
+                  "download page, you can still open it:"),
+            ("steps", [
+                "Click More info, under the message in the box.",
+                "Check the name beside App. It should be TapewrightSetup.exe, perhaps with a number such as "
+                "(1) if you downloaded it more than once. If it is anything else, click Don't run.",
+                "Click the Run anyway button, and Setup opens.",
+            ]),
+            ("p", "Windows says this about a new program from a small maker until it has seen that "
+                  "program many times. Tapewright's installer isn't signed yet, either. A signature is "
+                  "the maker's name, checked by a company Windows trusts, and without one the box says "
+                  "Unknown publisher."),
+            ("p", "If the box has no Run anyway button, only OK, this computer blocks programs that aren't "
+                  "signed, for example with a Windows 11 setting called Smart App Control. Click OK: nothing "
+                  "has been installed. Then wait for a signed version of Tapewright, or run Tapewright from "
+                  "its source code instead, which Tapewright's page on github.com explains."),
+            ("tip", "Only click Run anyway for a file from Tapewright's own download page. To open that "
+                    "page, click the button below that says Open the Tapewright download page."),
+        ],
+        "actions": ["release_page"],
     },
     {
         "title": "Copy, paste and other basics",

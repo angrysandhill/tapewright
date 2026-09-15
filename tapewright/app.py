@@ -33,6 +33,9 @@ SWAP_WAIT_S = 10
 # replacing files a running copy is using.
 APP_MUTEX = "Tapewright.Running"
 _app_mutex = []  # its handle, which nothing ever closes: the name belongs to this process until it ends
+# The ID the installer's shortcuts carry too, so the taskbar groups the open window with them, and with
+# a copy of one pinned there, rather than with pythonw.exe.
+APP_USER_MODEL_ID = "AngrySandhill.Tapewright"
 
 
 class App:
@@ -564,6 +567,21 @@ def _enable_dpi_awareness():
         pass  # older Windows: the window is merely blurry
 
 
+def _set_app_user_model_id():
+    """Give this process the ID the installer's shortcuts carry, so the taskbar groups its window with them.
+
+    Microsoft's documentation asks for it before a program shows anything, so main() calls this before the
+    window exists.
+    """
+    if os.name != "nt":
+        return
+    try:
+        import ctypes
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(APP_USER_MODEL_ID)
+    except Exception:
+        pass  # only the taskbar's grouping is lost
+
+
 def _hold_app_mutex():
     """Name this process as a running Tapewright, so the Windows installer knows to wait for it to close.
 
@@ -583,6 +601,7 @@ def _hold_app_mutex():
 def main():
     """Open the window. Start through launch.main(), which first checks this Python can run it."""
     _enable_dpi_awareness()
+    _set_app_user_model_id()
     settings = config.Settings()
     settings.load()
     try:

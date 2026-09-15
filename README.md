@@ -10,11 +10,53 @@ conversion that uses it.
 
 Only download what you have the right to. Many sites' terms forbid downloading.
 
-## Running it
+## Install on Windows
+
+For Windows 10 or 11, 64-bit:
+
+1. Open the [latest release](https://github.com/angrysandhill/tapewright/releases/latest) and,
+   under **Assets**, click `TapewrightSetup.exe`. The files called *Source code* aren't needed.
+2. Open the file you downloaded. Tapewright is installed just for you, so no administrator
+   password is needed, and nothing is downloaded while it installs.
+3. The first time Tapewright opens, it offers to download the helpers it uses (see
+   [The first launch](#the-first-launch)).
+
+The installer isn't signed yet. If your browser says the file isn't commonly downloaded, choose
+*Keep*. If Windows says *Windows protected your PC*, click *More info*, check that the name beside
+*App* is `TapewrightSetup.exe`, and click *Run anyway*. If that box only offers *OK*, the computer
+blocks programs that aren't signed, for example with Smart App Control: wait for a signed release,
+or [run Tapewright from source](#running-from-source).
+
+What goes where:
+
+- **Tapewright and its own private Python**, which yt-dlp is installed into, go in
+  `%LOCALAPPDATA%\Programs\Tapewright`. That Python is only for Tapewright: it isn't put on `PATH`
+  and doesn't change any Python you already have.
+- **The helpers Tapewright downloads**, FFmpeg and deno, go in `%LOCALAPPDATA%\Tapewright\tools`.
+- **Settings** go in `%APPDATA%\Tapewright`.
+
+**To update**, download the new `TapewrightSetup.exe` the same way and open it. The Settings tab
+says when a new version is out, and its button opens the release page. Settings and helpers are
+kept, yt-dlp included unless the new version brings a different Python, in which case the setup
+page offers yt-dlp again. If Tapewright is open, Setup asks you to close it first, then click
+*OK*; it never closes Tapewright itself.
+
+**To uninstall**, open Windows' Settings, then *Apps* (*Installed apps* on Windows 11, *Apps &
+features* on Windows 10), and uninstall Tapewright. That removes Tapewright, its Python with
+yt-dlp, and the FFmpeg and deno it downloaded. Your settings are kept; delete
+`%APPDATA%\Tapewright` to remove them too. A copy of FFmpeg, deno or Node.js that Tapewright didn't
+download, such as one winget installed, is left alone.
+
+Each release lists the installer's SHA-256 in `SHA256SUMS.txt`, and GitHub keeps a record of the
+workflow that built it, which this command checks:
+`gh attestation verify TapewrightSetup.exe --repo angrysandhill/tapewright`.
+
+## Running from source
 
 You need Python 3.10 or newer with Tkinter. The Python from python.org includes Tkinter on
 Windows and macOS; on Linux it is often a separate package, such as `python3-tk` on Debian and
-Ubuntu.
+Ubuntu. Get the source with *Code* and then *Download ZIP* on this project's GitHub page, or with
+`git clone https://github.com/angrysandhill/tapewright`, and in its folder run:
 
 ```
 python -m tapewright
@@ -136,7 +178,7 @@ the Settings tab:
 - **yt-dlp channel:** stable, or nightly, where fixes for site changes arrive days sooner.
 - **Update yt-dlp automatically** when a new version is out, or install it when it is missing,
   without asking first. Off by default.
-- **Check for updates on startup.** On by default.
+- **Check for updates when Tapewright starts.** On by default.
 - **Offline:** if the online check fails, the last known answer is used. With no known
   answer, yt-dlp still counts as out of date once its version (a release date) passes the
   age you set.
@@ -180,6 +222,32 @@ When something goes wrong, the reason says what to do about it, such as trying a
 when GitHub has had too many requests, or checking the computer's date and time when a secure
 connection couldn't be made.
 
+## Privacy
+
+Tapewright has no telemetry: it never reports anything about you, your computer or what you
+convert. It connects only to these, and only for the reasons given:
+
+- **pypi.org**, to look up yt-dlp's newest version, and **pypi.org** and **files.pythonhosted.org**
+  when pip installs or updates yt-dlp.
+- **www.gyan.dev** (on Windows) and **dl.deno.land**, to look up the newest FFmpeg and deno. When
+  GitHub can't give a download's checksum, gyan.dev's own checksum for FFmpeg stands in.
+- **api.github.com**, for a helper's size and SHA-256 before it is downloaded, and to see whether a
+  newer Tapewright is out, at most once a day, or an hour after a check that failed.
+- **github.com**, where FFmpeg and deno are downloaded from, along with deno's checksum file when
+  GitHub's listing has no SHA-256. GitHub sends the files themselves from its own download servers.
+- **Wherever winget and `deno upgrade` connect**, when you use the Settings tab to update a copy of
+  FFmpeg, deno or Node.js that winget or deno's own updater installed: winget reaches Microsoft's
+  winget source and the package's download site, and `deno upgrade` reaches deno's download servers.
+- **The sites of the links you paste**, and the servers they send the video from, which yt-dlp
+  downloads from.
+
+The version lookups and the release check run when Tapewright checks for updates: as it starts,
+unless *Check for updates when Tapewright starts* is off on the Settings tab, and when you do
+something that needs a fresh answer, such as clicking *Check for updates*. Nothing is installed or
+downloaded until you click, unless you turn on *Update yt-dlp automatically when a new version is
+out*. A button that opens a web page, such as a download page, opens it in your own web browser.
+Like any website, each of these sees your computer's internet address.
+
 ## When a site stops working
 
 Update yt-dlp first, and try the nightly channel if stable is not enough. If it still fails,
@@ -205,8 +273,14 @@ tapewright/deck.py          the cassette and display that show a conversion runn
 tapewright/settings_tab.py  the Settings tab
 tapewright/help_tab.py      the Help tab
 tapewright/widgets.py       the log view, the banner, the warning dialog and the edit menu
+packaging/build.py          the installer's build steps: python.org's runtime, its checks, staging, sums
+packaging/runtime.json      the python.org runtime the installer carries: version, address, SHA-256, Tk
+packaging/tapewright.iss    the Inno Setup script that makes TapewrightSetup.exe
+packaging/make_icon.py      writes packaging/tapewright.ico from the title bar's cassette
+packaging/*.txt, *.md       the text on Setup's Information page and on the release page
 tests/test_core.py          everything but fetch.py, with the window built withdrawn
 tests/test_fetch.py         fetch.py with fake downloads, and once as a real child cancelled midway
+tests/test_packaging.py     the build steps and the icon, and the .iss and release.yml against the code
 ```
 
 `fetch.py` sits in the package but is a program of its own: the window runs it by its path, and
@@ -219,9 +293,16 @@ python -m unittest discover -s tests -v
 GitHub Actions runs the same tests on every push, on Windows and Linux with Python 3.10 and
 3.14 (`.github/workflows/test.yml`).
 
+`.github/workflows/release.yml` builds the Windows installer with Inno Setup. A pushed `v<version>`
+tag ends in a draft release, published by hand once it has been tried on a spare Windows account;
+*Run workflow* builds the same installer as a download from that run and releases nothing. Its
+build steps, other than the unit tests and compiling, are subcommands of `packaging/build.py`, so
+each can be run locally. Compiling needs Inno Setup 6.6 or later, and its command line is at the top
+of `packaging/tapewright.iss`.
+
 Read [AGENTS.md](AGENTS.md) before changing anything in `jobs.py`, `procs.py`, `deps.py`,
-`fetch.py`, `app.py` or `setup_screen.py`. Each rule in it exists because breaking it failed
-quietly.
+`fetch.py`, `app.py`, `setup_screen.py` or `packaging/`. Each rule in it exists because breaking it
+fails quietly.
 
 ## License
 
@@ -234,8 +315,12 @@ In short, anyone may use, study, change and share it. Anything distributed that 
 it, including a repackaged `.exe`, must be released under the same license, with its source
 code. It comes with no warranty.
 
-Tapewright never ships yt-dlp, FFmpeg or deno. Each copy of the app gets them from the projects
-that make them, and they keep their own licenses.
+Tapewright never ships yt-dlp, FFmpeg or deno, not even in the Windows installer. Each copy of the
+app gets them from the projects that make them, and they keep their own licenses.
+
+The Windows installer does include python.org's Python for Windows, unmodified, with the Tcl/Tk and
+pip that come with it. Each is under its own license, and their license files are in the installed
+`runtime` folder, starting with Python's `LICENSE.txt`.
 
 Contributions are accepted under the same license. Every source file starts with two SPDX
 lines naming it, and a test fails if a new file is missing them.

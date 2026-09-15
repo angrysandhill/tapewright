@@ -85,7 +85,10 @@ def intro_text(listed, plan, windows):
     if pipped:
         sentences.append(f"{_names(pipped)} {'are' if len(pipped) > 1 else 'is'} added to the Python that "
                          "runs Tapewright.")
-    if windows:  # pip falls back to the user's own folder, and the fetcher writes only to %LOCALAPPDATA%
+    # pip installs only where the user can write: the installer's Python sits in the user's own folder, and
+    # any other Python's pip falls back to the user's site-packages when it can't write to its own.
+    # The fetcher writes only to %LOCALAPPDATA%.
+    if windows:
         sentences.append("You don't need an administrator password.")
     return " ".join(sentences)
 

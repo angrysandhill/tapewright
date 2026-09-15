@@ -12,9 +12,14 @@ tries to inside `problem()`, to say when it is missing, and `launch.main()` hand
 `convert_tab.py`, `settings_tab.py`, `help_tab.py`, `deck.py`, `theme.py` and `widgets.py`.
 `fetch.py` belongs to neither: it is a program of its own that the app runs as a child (see "The
 fetcher is a child process" below). The tests drive the first half directly, test the pure
-functions in `deck.py` and `theme.py` (the reel geometry, the contrast ratio) without a window,
-build the real window withdrawn in the `Window` class, and cover `fetch.py` in
-`tests/test_fetch.py`.
+functions in `deck.py` and `theme.py` (the reel geometry, the contrast ratio, the cassette's
+pixels) without a window, build the real window withdrawn in the `Window` class, and cover
+`fetch.py` in `tests/test_fetch.py`.
+
+`packaging/` is part of neither half, and only its icon ships. Its scripts run on the machine that
+builds the Windows installer (see "The installer" below): `build.py` reads Tapewright's version
+with `ast` rather than importing the package, and `make_icon.py` imports only `theme`, inside
+`main()`. `tests/test_packaging.py` covers both without a network, Inno Setup or a runtime.
 
 It uses the standard library only, deliberately. External tools are run as programs, never
 imported.
@@ -52,10 +57,10 @@ gaps).
   site-packages, can't answer in place of the one the Settings tab installs. A Python someone
   installed themselves keeps its environment. With `PYTHONNOUSERSITE=1`, pip never falls back to the
   user's site-packages when it can't write to the Python's own (its `decide_user_install` returns
-  before looking), so the installer must put its Python in a folder the user can write to, such as
-  `%LOCALAPPDATA%\Programs\Tapewright`, or the setup screen's yt-dlp install fails. Read in pip
-  26.1.1's source, and seen by calling that function, installing nothing, on this PC's Python in
-  Program Files. Tested only with the marker file made by hand (see Known gaps).
+  before looking), so the installer's Python must sit in a folder the user can write to, or the setup
+  screen's yt-dlp install fails (see "The installer is per user"). Read in pip 26.1.1's source, and
+  seen by calling that function, installing nothing, on this PC's Python in Program Files. Tested
+  only with the marker file made by hand (see Known gaps).
 - **Arguments are lists and `shell=False`.** Any YouTube URL with `&list=` breaks under
   `cmd.exe`, and pasted text must never reach a shell.
 - **Cancel kills the whole tree** (`taskkill /F /T` on Windows, `killpg` elsewhere). During
@@ -322,11 +327,20 @@ gaps).
   by the cause (`launch.tk_failure_fix`): reinstalling Python doesn't bring a display, or clear a
   stray `TCL_LIBRARY`. On Windows the explanation is a message box.
 - **A running Tapewright holds the named mutex `Tapewright.Running`** (`app._hold_app_mutex`), on
-  Windows, from the moment its window has opened until the process ends. It is for the Windows
-  installer's AppMutex, so an installer waits for Tapewright to close rather than replacing files
-  it is using; a close forced from outside could skip `App.shutdown()`, the only thing that stops
-  detached children. The handle is never closed, since Windows releases the name when the process
-  ends. The installer doesn't exist yet, so nothing has read the mutex.
+  Windows, from the moment its window has opened until the process ends. It is the installer's
+  `AppMutex`, which Setup and Uninstall both look for when they start (from Inno Setup's help), so
+  they wait for Tapewright to close rather than replace files it is using (the script's side, and why
+  nothing closes Tapewright for them, is under "The installer"). The handle is never closed, since
+  Windows releases the name when the process ends. No installer has been built yet, so nothing has
+  read it (see Known gaps).
+- **The window takes the shortcuts' taskbar ID before it exists** (`app.APP_USER_MODEL_ID`,
+  `app._set_app_user_model_id`). The installer's shortcuts carry `AngrySandhill.Tapewright` as
+  their AppUserModelID, and `main()` gives the process the same ID on Windows before `tk.Tk()`,
+  since Microsoft's documentation asks for it before a program shows anything. That lets the taskbar
+  group the window with those shortcuts, and with a pinned copy of one, rather than with
+  `pythonw.exe`. A failure is ignored, since only the grouping is lost. `tests/test_packaging.py`
+  fails when a shortcut carries another ID. The grouping is reasoned from that documentation; no
+  real shortcut has run it.
 - **Only the Tk main thread touches widgets.** Workers call `App.post()`. Every job event
   carries its `Runner`, and events from any runner other than the tab's current one are
   dropped, so a late event from a finished job can't repaint the next one.
@@ -455,7 +469,9 @@ gaps).
   `help_content.ACTION_LABELS`, the one file that test doesn't read; text that names one says
   "the button below that says ...", and a test fails unless that button is under that answer.
   Topic titles stay within 30 characters, because the question list cannot wrap. No test checks
-  where the text says something is, so move its words when you move a widget.
+  where the text says something is, so move its words when you move a widget. Words on someone
+  else's screen, such as Windows' "Run anyway" in "Windows warned me about it", are never marked,
+  because that test would look for them in Tapewright's source.
 - **Every box the Help tab mentions has a right-click menu and Ctrl+A**
   (`widgets.add_edit_menu`). Tk entries come with neither, and the Help tab tells people to
   right-click and paste.
@@ -469,6 +485,123 @@ gaps).
   database by class (`*Text.background`), never a bare `*Background`, which ttk widgets also
   read as an option that then overrides their style's state maps.
 
+### The installer
+
+`TapewrightSetup.exe` is built by `.github/workflows/release.yml` with Inno Setup, from
+`packaging/tapewright.iss`, python.org's Python runtime and Tapewright's source. The steps that
+build it, other than the unit tests and compiling, are subcommands of `packaging/build.py`, whose
+docstring lists them in order, so each can be run locally. Compiling needs Inno Setup, and the top
+of `tapewright.iss` gives its command line. The installer itself has never been built or run (see
+Known gaps).
+
+- **The runtime is python.org's own zip, unmodified, pinned in `packaging/runtime.json` and
+  verified twice.** The pin names the version, the zip's address, its SHA-256 and the Tk version,
+  and `build.load_pin` refuses any other shape. It is the zip python.org's install manager
+  (pymanager) installs, listed in `index-windows.json`. `build.py runtime` hashes the download as it
+  streams and keeps it only with the pinned SHA-256; then python.org's live index must still list
+  that exact address with that hash, on any of its pages (`next` links are followed on python.org
+  only), so a pin python.org has withdrawn or re-hashed stops the build instead of shipping.
+  Unpacking refuses any member name that could land outside its folder (`build.safe_members`: a
+  leading slash of either kind, any colon, which could name a drive or a stream, or a part other than
+  `.` made only of dots and spaces). To move the pin, read the index and change the version, address
+  and hash together. Three files hold them, and the tests fail until all three agree:
+  `packaging/runtime.json`, `tapewright.iss` (`PyVersion`'s default) and `tests/test_packaging.py`
+  (`URL`, `SHA` and the pin's `tk`).
+- **`build.py check` stands between the zip and the installer.** It runs the runtime's own
+  `python.exe` and fails unless it is the pinned Python, `tkinter.TkVersion` and Tcl's patch level
+  are the pinned Tk, `-m pip --version` works, `pythonw.exe` (which the shortcuts start) and
+  `LICENSE.txt` exist, and there is no `._pth` file, which would limit Python's search path to what
+  it lists, so the yt-dlp pip installs could go unread. It runs that Python with `-I`, as the
+  shortcuts do, so the pip it finds is the runtime's own: on this PC's Python in Program Files,
+  plain `-m pip` found a newer pip in the user's site-packages, and `-I` found the Python's own.
+- **The unit tests run on the runtime before it is marked, and write no bytecode into it.**
+  `procs.bundled()` treats a Python with `tapewright-runtime.txt` beside it as the installer's own and
+  changes its children's environment, so `release.yml` runs the suite first, as on a Python someone
+  installed, and only then does `build.py mark` write the pinned version, which `RuntimeChanged`
+  later reads; a test keeps `build.MARKER` and `procs.RUNTIME_MARKER` the same. The job sets
+  `PYTHONDONTWRITEBYTECODE=1`, and `check` passes `-B` too, so no `__pycache__` folder lands in what
+  the installer copies.
+- **Tk stays 8.6, so the pin stays at 3.14.6, until the whole window has been run on a Tk 9
+  build.** python.org's 3.14.7 moved to Tcl/Tk 9.0, while 3.14.6 carries 8.6.15 (read in CPython's
+  `PCbuild/get_externals.bat`), and Tapewright's window, setup screen and Help tab have never run
+  on Tk 9. `check` compares Tk with the pin's `tk`, so moving the Python alone fails the build;
+  change `tk` only after running the window on that Python.
+- **The installer is per user, never in Program Files** (`PrivilegesRequired=lowest`, and no
+  `PrivilegesRequiredOverridesAllowed`, so `/ALLUSERS` can't move it). `{autopf}` is then the user's
+  own `%LOCALAPPDATA%\Programs`, and the folder page is hidden. That also means no administrator
+  prompt, but the reason it must stay this way is pip, which installs yt-dlp into the runtime and has
+  no user folder to fall back on (see "The installer's own Python keeps its children to itself"). A
+  test holds `PrivilegesRequired`, the missing override, `DefaultDirName` and `DisableDirPage`.
+- **The runtime folder is replaced only when the pin changes** (`RuntimeChanged`, in the script's
+  `[Code]`), because pip installed yt-dlp into it and an app update shouldn't lose that; after a pin
+  change the setup screen offers yt-dlp again. `{app}\app`, by contrast, is replaced whole on every
+  install, so a module a newer version dropped can't linger. `RuntimeChanged` is True when
+  `{app}\runtime` has no `python.exe`, no `tapewright-runtime.txt`, or a marker naming another
+  version than `PyVersion`. Setup may call it several times (on the Preparing page when Windows has
+  renames pending, for the progress bar's size, for `[InstallDelete]`, then for each runtime file),
+  the first always after `{app}` is known and before the folder changes (read in Inno Setup 6.7.1's
+  source). It keeps that first answer, which describes the folder as it was, so every call in one
+  Setup agrees whatever has been deleted or copied by then.
+- **In `[Files]` the app comes first, then the runtime, then the runtime's marker on its own.**
+  `SolidCompression=yes` packs everything as one stream, which Inno Setup's help says compresses
+  many small files far better, but reaching a file means unpacking every file before it. With the
+  runtime last, an update that skips it never unpacks it. The runtime's wildcard excludes
+  `tapewright-runtime.txt`, and a last entry copies it, so a Setup stopped partway through the
+  runtime (a crash, a forced restart) leaves no marker, and the next Setup replaces the runtime
+  instead of keeping half of one. A test holds the order, the `Excludes` and the marker's entry.
+- **`AppMutex` is `app.APP_MUTEX`, and `CloseApplications=no`.** Restart Manager would end Tapewright
+  from outside, skipping `App.shutdown()`, the only thing that stops detached children. Setup's
+  message asks for Tapewright to be closed and OK clicked, which is what Help's "Updating Tapewright"
+  and the release notes tell people to do. Setup looks for the mutex only as it starts, and Tapewright
+  can be opened while the wizard is up, so `PrepareToInstall`, in the script's `[Code]`, looks again
+  after the last page and before anything is deleted, with the same message; Cancel, or a silent
+  install run with `/SUPPRESSMSGBOXES`, stops Setup with nothing changed. A test holds both
+  directives, and that `PrepareToInstall` looks for the same name.
+- **The shortcuts and the Finish page start `{app}\runtime\pythonw.exe -I
+  "{app}\app\Tapewright.pyw"`, in `{app}\app`.** With `-I`, no `PYTHON*` variable another program
+  left behind and no user site-packages can break the start, while the runtime's own site-packages,
+  where yt-dlp is, still loads. It also leaves the script's folder off `sys.path`, which
+  `Tapewright.pyw` puts back itself. A test checks the three entries start Tapewright alike, and that
+  each file they name in the app folder is one `stage` copies.
+- **The AppId never changes.** Windows knows the installed app by
+  `{C7E317BA-41A6-4ADE-ABE5-173A5DAC0058}` (written with a doubled `{{` in the script). A later
+  Setup with the same ID finds the same folder and replaces the same Installed apps entry; a new ID
+  would install a second Tapewright beside the first. `OutputBaseFilename=TapewrightSetup` carries
+  no version, so `/releases/latest/download/TapewrightSetup.exe` always finds the newest. A test
+  fixes both.
+- **yt-dlp, FFmpeg and deno never ship in the installer.** `build.py stage` copies only
+  `Tapewright.pyw`, `tapewright/*.py` (no `__pycache__`, no tests), `LICENSE`, `README.md` and the
+  icon, and refuses a module in a folder below `tapewright/`, which it would otherwise leave behind
+  with no word. `runtime` and `stage` refuse a folder that already holds something rather than
+  delete it, so nothing left over from before ships. The helpers come from the first launch's setup
+  screen; only the pip inside python.org's zip ships with the runtime.
+- **Uninstall removes the helpers and keeps the settings.** Beyond what Setup copied,
+  `[UninstallDelete]` removes `{app}\runtime` (the packages pip added), `{app}\app` (the bytecode
+  Python writes beside the installed modules when Tapewright runs),
+  `%LOCALAPPDATA%\Tapewright\tools`, and then `%LOCALAPPDATA%\Tapewright` if that leaves it empty;
+  `%APPDATA%\Tapewright` is kept. There is no entry for `{app}` itself: once its own files are
+  gone, Uninstall tries again the folders it couldn't remove at first (read in Inno Setup's
+  `Setup.UninstallLog.pas`, not seen). A test fails when an entry reaches into `%APPDATA%`.
+- **`packaging/tapewright.ico` is the cassette `theme.cassette_pixels` draws, and the committed file
+  must match a fresh drawing.** `cassette_pixels(size)` is pure, and `theme.cassette_icon` fills the
+  title bar's 48-pixel image from it, so the title bar, the shortcuts, Setup and Installed apps show
+  one cassette. `make_icon.py` writes 16, 24, 32, 48 and 64 pixels as bitmaps and 256 as a PNG
+  (Inno Setup's help recommends at least 16, 32, 48, 64 and 256; 24 is the small icon at 150%).
+  `tests/test_packaging.py` draws it again and compares bytes, so changing the cassette or a color
+  it uses fails until `python packaging/make_icon.py` has been run and the .ico committed. The PNG's
+  deflate stream is written by hand rather than with `zlib.compress`: measured, the same data at the
+  same level compressed to different bytes on Windows' Python 3.14.5 (zlib-ng) and WSL's 3.14.4
+  (zlib), and the test runs on both. `.gitattributes` marks `*.ico` binary.
+- **Only a pushed tag releases, and only as a draft.** `release.yml` runs on a pushed `v*` tag and
+  on Run workflow. The tag check (`build.py check-tag`: `v` and `tapewright.__version__`, exactly),
+  the attestation (`actions/attest`) and `gh release create --draft` run only for a push, so a
+  manual run, even from a tag, leaves a workflow artifact and releases nothing. `build.py versions`
+  prints `app=` and `python=` lines for ISCC's `/DAppVersion` and `/DPyVersion`. Inno Setup is the
+  runner image's own, refused below 6.6, where `WizardStyle=modern dark` arrived, and never
+  downloaded. A test fails when the workflow calls a `build.py` step that doesn't exist or leaves one
+  out, runs the steps out of order, or lets a releasing step run without a push. The draft is
+  published by hand, after the checklist under Testing.
+
 ## Licensing
 
 Tapewright is `GPL-3.0-or-later`, and the text is in `LICENSE`. Every source file starts with
@@ -476,6 +609,11 @@ the same two lines, and `tests/test_core.py` fails when a file is missing them:
 
     # SPDX-FileCopyrightText: 2026 AngrySandhill
     # SPDX-License-Identifier: GPL-3.0-or-later
+
+That covers `tapewright/`, `tests/`, `Tapewright.pyw`, `packaging/*.py`, the workflows and
+`tapewright.iss`, whose two lines start with `; ` instead. `packaging/before-install.txt` and
+`packaging/release-notes.md` have none, since people read them on Setup's Information page and on
+the release page. `packaging/runtime.json` has none either, since JSON has no comments.
 
 Running yt-dlp, FFmpeg and deno as separate programs, and never shipping them, is also why
 their licenses don't reach this code. Tapewright's own FFmpeg and deno don't change that: each
@@ -485,6 +623,13 @@ has to include that tool's license and meet its terms. For FFmpeg those depend o
 `ffmpeg -version` lists `--enable-gpl` for a GPL build, and a build with `--enable-nonfree` can't
 be redistributed at all. The fetcher refuses an FFmpeg whose test run shows `--enable-nonfree` or
 lacks `--enable-gpl`, and unpacks the build's `LICENSE` beside it when the zip has one.
+
+The Windows installer does carry other people's software: python.org's Python runtime, unmodified,
+with the Tcl/Tk and pip that come in its zip. Each keeps its own license, and the license files stay
+where python.org put them in the runtime folder. `build.py check` fails without Python's
+`LICENSE.txt`. In python.org's 3.14.5 install on the PC this was built on, Tk's terms are in
+`tcl\tk8.6\license.terms` and pip's in its `dist-info` folder; the zip's layout hasn't been looked
+at. yt-dlp, FFmpeg and deno are still never in it.
 
 ## Testing
 
@@ -526,12 +671,52 @@ on Windows with its fonts; the Ubuntu jobs use others.
 Ubuntu jobs under `xvfb-run` so the window tests run there too. A test that passes on 3.14 alone
 has not shown it works on the oldest Python `pyproject.toml` accepts.
 
+`tests/test_packaging.py` needs no network, no Inno Setup and no runtime. It reads `tapewright.iss`
+and `release.yml` as text and checks them against the code, tests `build.py`'s helpers with fake
+downloads and zips, and compares the committed icon with a fresh drawing, the one test there that
+skips on a Python without Tk. Whether Inno Setup compiles the script, and whether the installer
+behaves, only `release.yml` and the checklist below can show. `release.yml` also runs the whole
+suite on the runtime before marking it, with `TAPEWRIGHT_CONFIG_DIR` and `TAPEWRIGHT_TOOLS_DIR` in
+the runner's temp folder.
+
 There is no automated end-to-end suite yet. To drive the real window against the real tools from
 a script, replace the modal pieces (`app.ask_outdated`, `app.confirm` and `app.inform` are
 attributes for exactly this reason) and set `TAPEWRIGHT_CONFIG_DIR` and `TAPEWRIGHT_TOOLS_DIR` to
 scratch folders, so the run never touches real settings or Tapewright's real copies of FFmpeg and
 deno. Test the pip update path inside a throwaway venv whose `python.exe` runs the app, since the
 app installs into whichever Python runs it.
+
+### Before publishing a release
+
+A pushed tag leaves a draft release. The maintainer publishes it only after these steps, on a spare
+standard (not administrator) Windows account:
+
+1. Download the draft's `TapewrightSetup.exe` with a browser, and screenshot any warning it shows.
+   Compare `Get-FileHash` with `SHA256SUMS.txt`, run
+   `gh attestation verify TapewrightSetup.exe --repo angrysandhill/tapewright`, and scan it.
+2. Open it. No administrator (UAC) prompt may appear. Screenshot the SmartScreen box, before and
+   after "More info", for the release notes. Check what the browser's warning and this box say
+   against the README, the release notes, and Help's "Updating Tapewright" and "Windows warned me
+   about it", and look at each page of the dark wizard.
+3. On the setup page, click "Install them now", then "Cancel" during the FFmpeg download. Then
+   install everything, up to "All set!".
+4. Convert a link to MP3, a link to MP4 and a local file.
+5. "Copy details for my helper" shows a Python under `%LOCALAPPDATA%\Programs\Tapewright\runtime`,
+   "the installer's own Python: yes" and Tk 8.6.15. Close Tapewright, pin its Start menu shortcut to
+   the taskbar and open it from there: its window must share the pinned button rather than get one
+   of its own.
+6. With Tapewright open, run the same installer again. Setup must show its AppMutex message, in the
+   words Help's "Updating Tapewright" and the release notes repeat, and close nothing. Close
+   Tapewright and click OK; once Setup has finished, yt-dlp is still installed and the settings are
+   unchanged.
+7. Run the installer again with Tapewright closed, and open Tapewright while Setup's first page is
+   showing. Click through: the same message must appear before anything is installed, and Cancel
+   must leave the installed Tapewright as it was.
+8. When there is an earlier release, install it first and this one over it. If the pin changed, the
+   setup page offers yt-dlp again.
+9. Uninstall from Installed apps. `%LOCALAPPDATA%\Programs\Tapewright` and
+   `%LOCALAPPDATA%\Tapewright` are gone, and `%APPDATA%\Tapewright\settings.json` is still there.
+10. Add the screenshots to the release notes, and publish.
 
 ## Known gaps
 
@@ -566,9 +751,26 @@ app installs into whichever Python runs it.
   upgrade command gained `--source` and the accept flags in 0.1.1, and the new command line hasn't
   been run against the real winget since. Nor has the reinstall advice the update log gives when
   winget can't help (`winget uninstall --id`).
-- The Windows installer that writes `tapewright-runtime.txt` and waits on `Tapewright.Running`
-  doesn't exist yet, so both ends in this repository are tested only against fakes. Where it must
-  put its Python is in "The installer's own Python keeps its children to itself".
+- The Windows installer has never been built or run. Inno Setup isn't installed on the PC this was
+  built on, so `tapewright.iss` has never been compiled and `release.yml` has never run. The
+  script's directives were checked against Inno Setup 6.7.1's help and source, and
+  `tests/test_packaging.py` checks only its text. Unproven until the first build and the checklist
+  under Testing: the preprocessor's line spanning, `RuntimeChanged`'s cached answer across
+  `[InstallDelete]` and `[Files]`, the marker's `Excludes` pattern, `PrepareToInstall`'s second look
+  for the mutex, `WizardStyle=modern dark`, the taskbar grouping by AppUserModelID, whether the
+  runner's Inno Setup is where the workflow looks, whether python.org's live index lists the pin the
+  way `build.index_has` reads it, whether the 3.14.6 zip passes `check` and the tests there, and the
+  wording of Setup's AppMutex message, which Help and the release notes repeat. Both ends in this
+  repository, `tapewright-runtime.txt` and `Tapewright.Running`, are tested only against fakes.
+  After the first CI build this becomes "built but not yet run", until the checklist passes.
+- The installer isn't signed. Until it is, SmartScreen warns about each new version (an unsigned
+  file's reputation starts again with every one, from Microsoft's SmartScreen documentation), and a
+  Windows 11 PC with Smart App Control on blocks it outright. Help's "Windows warned me about it",
+  the README and the release notes describe both boxes, and Help's "Updating Tapewright", the
+  README and the release notes the browser's "Keep", all from documentation; none of them has been
+  seen on this PC.
+- The installer accepts Arm64 Windows 11, which runs x64 programs (`x64compatible`), but it hasn't
+  been tried there.
 - The fetch buttons don't check for 64-bit Windows. On 32-bit Windows the button appears and
   `fetch.py` refuses with its "only on 64-bit Windows" sentence. It accepts ARM64, where
   Windows 11 runs x64 programs; Windows 10 on ARM can't, and gets the "Windows stopped FFmpeg from
@@ -600,5 +802,6 @@ app installs into whichever Python runs it.
   it from a desktop launcher on Linux or macOS still shows nothing.
 - There is no GPU encoding and no drag-and-drop: Tk has none without the tkdnd extension.
 - The Help tab's wording assumes Windows: File Explorer, the yellow folder on the taskbar,
-  Windows+E. On macOS or Linux the steps are right but some of the names are not.
+  Windows+E. On macOS or Linux most steps are right but some of the names are not, and "Updating
+  Tapewright" describes the Windows installer, with one paragraph for copies run from source.
 - There is one look, the dark VCR one; no light or system theme to switch to.

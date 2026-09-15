@@ -8,6 +8,7 @@ It must parse on any Python 3, including ones too old to run Tapewright: see tap
 import os
 import sys
 
+# The installer's shortcuts and Finish page run this with -I, which leaves the script's folder off sys.path.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from tapewright.launch import main  # noqa: E402

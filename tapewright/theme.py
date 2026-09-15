@@ -10,6 +10,7 @@ Label, Toplevel) never read ttk styles, so they get the same colors from the opt
 tests/test_core.py checks every pair in CONTRAST, and that no other module spells out a color.
 """
 
+import itertools
 import tkinter as tk
 import tkinter.font as tkfont
 from tkinter import ttk
@@ -204,26 +205,53 @@ def apply(root):
     root.iconphoto(True, root._cassette_icon)
 
 
+# The cassette, on a square 48 units across. Boxes are (left, top, right, bottom, color), each drawn over the
+# ones before it, and the two reels go on top of them all.
+_DESIGN = 48
+_BOXES = (
+    (2, 10, 46, 38, "shell_edge"),
+    (3, 11, 45, 37, "shell"),
+    (7, 13, 41, 20, "paper"),
+    (9, 22, 39, 34, "window"),
+)
+_REELS = ((17, 28), (31, 28))  # their middles
+# Squared distances from a reel's middle, so the limits are radii of 1.1, 2.4 and 5.5 units.
+_RINGS = ((1.2, "hub_hole"), (6, "hub"), (30, "tape"))
+
+
+def cassette_pixels(size):
+    """The cassette as size rows of size pixels, each a '#rrggbb' color from C, or None where it is clear.
+
+    Each pixel takes the color at its own middle in the 48-unit design, so every size draws the same cassette,
+    and at 48 each pixel is one unit. It needs no Tk window, so the installer's icon is drawn from it too.
+    """
+    rows = []
+    for row in range(size):
+        y = (row + 0.5) * _DESIGN / size
+        rows.append([_cassette_color((column + 0.5) * _DESIGN / size, y) for column in range(size)])
+    return rows
+
+
+def _cassette_color(x, y):
+    for middle_x, middle_y in _REELS:
+        squared = (x - middle_x) ** 2 + (y - middle_y) ** 2
+        for limit, name in _RINGS:
+            if squared <= limit:
+                return C[name]
+    for left, top, right, bottom, name in reversed(_BOXES):
+        if left <= x < right and top <= y < bottom:
+            return C[name]
+    return None
+
+
 def cassette_icon(root):
-    """A 48-pixel cassette drawn pixel by pixel for the title bar and taskbar, so no image file ships."""
-    image = tk.PhotoImage(master=root, width=48, height=48)
-
-    def box(x1, y1, x2, y2, color):
-        image.put(color, to=(x1, y1, x2, y2))
-
-    box(2, 10, 46, 38, C["shell_edge"])
-    box(3, 11, 45, 37, C["shell"])
-    box(7, 13, 41, 20, C["paper"])
-    box(9, 22, 39, 34, C["window"])
-    for center in (17, 31):
-        for y in range(22, 34):
-            for x in range(center - 6, center + 7):
-                # Squared distance from the reel's middle, so the limits are radii of 1.1, 2.4 and 5.5 px.
-                squared = (x + 0.5 - center) ** 2 + (y + 0.5 - 28) ** 2
-                if squared <= 1.2:
-                    box(x, y, x + 1, y + 1, C["hub_hole"])
-                elif squared <= 6:
-                    box(x, y, x + 1, y + 1, C["hub"])
-                elif squared <= 30:
-                    box(x, y, x + 1, y + 1, C["tape"])
+    """A 48-pixel cassette for the title bar and taskbar, so no image file ships."""
+    image = tk.PhotoImage(master=root, width=_DESIGN, height=_DESIGN)
+    for y, row in enumerate(cassette_pixels(_DESIGN)):
+        x = 0
+        for color, run in itertools.groupby(row):  # one put for each run of a color
+            width = len(list(run))
+            if color is not None:  # a pixel nothing is put into stays clear
+                image.put(color, to=(x, y, x + width, y + 1))
+            x += width
     return image

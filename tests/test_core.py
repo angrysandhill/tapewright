@@ -277,6 +277,38 @@ class Look(unittest.TestCase):
                     found.append(f"{path.name}:{node.lineno} {node.value}")
         self.assertEqual(found, [], "use theme.C, so the palette stays in one place")
 
+    @unittest.skipIf(theme is None, "a Python built without Tk")
+    def test_the_cassette_is_the_same_drawing_at_every_size(self):
+        colors = set(theme.C.values()) | {None}
+        for size in (16, 24, 32, 48, 64, 256):
+            with self.subTest(size=size):
+                pixels = theme.cassette_pixels(size)
+                self.assertEqual(len(pixels), size)
+                for row in pixels:
+                    self.assertEqual(len(row), size)
+                    self.assertLessEqual(set(row), colors)
+
+                def at(x, y):
+                    """The pixel over a point of the 48-unit design."""
+                    return pixels[int(y * size / 48)][int(x * size / 48)]
+
+                # Every part wider than the smallest size's pixels is where the design puts it.
+                self.assertEqual((at(17, 28), at(31, 28)), (theme.C["hub_hole"],) * 2)
+                self.assertEqual((at(24, 28), at(24, 16.5), at(24, 35.5)),
+                                 (theme.C["window"], theme.C["paper"], theme.C["shell"]))
+                self.assertEqual((pixels[0][0], pixels[-1][-1]), (None, None))
+
+    @unittest.skipIf(theme is None, "a Python built without Tk")
+    def test_the_cassette_at_48_pixels_is_one_pixel_to_a_unit(self):
+        c = theme.C
+        pixels = theme.cassette_pixels(48)
+        # By name first, so a failure says which part moved.
+        known = {(17, 28): "hub_hole", (31, 28): "hub_hole", (18, 28): "hub", (21, 28): "tape",
+                 (22, 28): "window", (24, 16): "paper", (24, 21): "shell", (2, 10): "shell_edge",
+                 (45, 37): "shell_edge", (0, 0): None, (1, 20): None, (47, 47): None}
+        for (x, y), name in known.items():
+            self.assertEqual(pixels[y][x], c[name] if name else None, f"({x}, {y}) should be {name}")
+
     @unittest.skipIf(deck is None, "a Python built without Tk")
     def test_the_reels_always_hold_the_same_tape(self):
         hub, full = 10.0, 30.0
@@ -1020,7 +1052,7 @@ class Setup(unittest.TestCase):
 
 
 class Release(unittest.TestCase):
-    """Whether a newer Tapewright is out, as this copy, version 0.1.1, would see it."""
+    """Whether a newer Tapewright is out, as a copy at version 0.1.1 would see it."""
 
     NOW = datetime.datetime(2026, 9, 14, 12, 0, 0)
 
@@ -1262,6 +1294,7 @@ class Window(unittest.TestCase):
         # Of tkinter, only Tk is patched: the except clause reads tk.TclError, which must stay real.
         with mock.patch.object(self.app.tk, "Tk", side_effect=error), \
                 mock.patch.object(self.app, "_enable_dpi_awareness"), \
+                mock.patch.object(self.app, "_set_app_user_model_id"), \
                 mock.patch.object(self.app.config, "Settings"), \
                 mock.patch.object(self.app.launch, "explain") as explain:
             self.assertEqual(self.app.main(), 1)
@@ -2245,11 +2278,11 @@ class Window(unittest.TestCase):
         app = self.open_window()
         tab = app.settings_tab
         self.assertEqual((tab.release.winfo_manager(), tab.log_caption.winfo_manager()), ("", "pack"))
-        seen = {"tapewright": {"version": "0.2.0", "checked": "2026-09-14T12:00:00"}}
+        seen = {"tapewright": {"version": "99.0.0", "checked": "2026-09-14T12:00:00"}}
         app._release_finished(seen, None)  # GitHub's answer, from a check that found nothing cached
         # In the caption's place on the bottom row, never a row of its own that pushes the log down.
         self.assertEqual((tab.release.winfo_manager(), tab.log_caption.winfo_manager(),
-                          self.text(tab.release_label)), ("pack", "", "Tapewright 0.2.0 is out."))
+                          self.text(tab.release_label)), ("pack", "", "Tapewright 99.0.0 is out."))
         self.assertIs(tab.release.master, tab.setup_button.master)
         self.assertEqual(app.settings["latest_cache"]["tapewright"], seen["tapewright"])
         with mock.patch("webbrowser.open") as open_page:
@@ -2362,8 +2395,8 @@ class Window(unittest.TestCase):
 
         def check_release(cache, online):
             queued.append([fn.__name__ for fn, _args in list(app._events.queue)])
-            return ({"version": "0.2.0", "url": deps.RELEASES_PAGE},
-                    {"tapewright": {"version": "0.2.0", "checked": "2026-09-14T12:00:00"}})
+            return ({"version": "99.0.0", "url": deps.RELEASES_PAGE},
+                    {"tapewright": {"version": "99.0.0", "checked": "2026-09-14T12:00:00"}})
 
         with mock.patch.object(deps, "check_all", return_value=(self.helpers(), {})), \
                 mock.patch.object(deps, "check_release", side_effect=check_release), \
@@ -2372,7 +2405,7 @@ class Window(unittest.TestCase):
         # However long GitHub takes, the check is already over, so it can't hold back a conversion.
         self.assertEqual(queued, [["_check_finished"]])
         self.pump(app)
-        self.assertEqual((app.checking, app.release["version"]), (False, "0.2.0"))
+        self.assertEqual((app.checking, app.release["version"]), (False, "99.0.0"))
 
     def test_a_release_answer_that_lands_late_never_hides_a_newer_one(self):
         two_days_ago = datetime.datetime.now().replace(microsecond=0) - datetime.timedelta(days=2)
@@ -2583,7 +2616,8 @@ class Window(unittest.TestCase):
             # No folder yet: nothing to put right, and none is made.
             lines = cancelled("ffmpeg", "STEP Downloading…")
             self.assertEqual((tools.exists(), found), (False, [None]))
-            self.assertEqual(lines[-2:], ["Downloading…", f"Converter (FFmpeg): {deps.cancel_text(ffmpeg)}"])
+            self.assertEqual(lines[-2:],
+                             ["Downloading…", f"Converter (FFmpeg): {deps.cancel_text(ffmpeg)}"])
 
             # Cancel was clicked before the window read the swap line, and the kill landed between the
             # renames. The old copy is back before the check after the batch looks, and nothing promises
@@ -2606,7 +2640,8 @@ class Window(unittest.TestCase):
             finally:
                 fetch.unlock(held)
             self.assertTrue((tools / ".ffmpeg-old").is_dir() and (tools / ".ffmpeg-new").is_dir())
-            self.assertEqual(lines[-2:], ["Downloading…", f"Converter (FFmpeg): {deps.cancel_text(ffmpeg)}"])
+            self.assertEqual(lines[-2:],
+                             ["Downloading…", f"Converter (FFmpeg): {deps.cancel_text(ffmpeg)}"])
 
             # A folder that can't be tidied says why in the log, and lets go of the tool.
             denied = PermissionError(13, "Access is denied")
@@ -2641,9 +2676,11 @@ class Window(unittest.TestCase):
         with mock.patch("webbrowser.open") as open_page:
             app.help_tab.open_ffmpeg_page()
             app.help_tab.open_deno_page()
+            app.help_tab.open_release_page()
         self.assertEqual([call.args[0] for call in open_page.call_args_list],
                          ["https://www.gyan.dev/ffmpeg/builds/",
-                          "https://github.com/denoland/deno/releases/latest"])
+                          "https://github.com/denoland/deno/releases/latest",
+                          "https://github.com/angrysandhill/tapewright/releases/latest"])
 
     def test_the_installer_can_tell_that_tapewright_is_open(self):
         fake_ctypes, fake_os = mock.Mock(), mock.Mock()
@@ -2658,11 +2695,43 @@ class Window(unittest.TestCase):
         self.assertEqual(held, [1234])  # kept for the life of the process
         with mock.patch.object(self.app.tk, "Tk") as tk_root, mock.patch.object(self.app, "App"), \
                 mock.patch.object(self.app, "_enable_dpi_awareness"), \
+                mock.patch.object(self.app, "_set_app_user_model_id"), \
                 mock.patch.object(self.app.config, "Settings"), \
                 mock.patch.object(self.app, "_hold_app_mutex") as hold:
             self.assertEqual(self.app.main(), 0)
         hold.assert_called_once_with()
         tk_root.return_value.mainloop.assert_called_once_with()
+
+    def test_the_taskbar_groups_the_window_with_the_installers_shortcuts(self):
+        # ctypes is faked, so this process's own ID is never changed here.
+        for os_name, refused, calls in (("nt", None, 1), ("nt", OSError("refused"), 1), ("posix", None, 0)):
+            fake_ctypes, fake_os = mock.Mock(), mock.Mock()
+            fake_os.name = os_name
+            set_id = fake_ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID
+            set_id.side_effect = refused
+            with mock.patch.dict(sys.modules, {"ctypes": fake_ctypes}), \
+                    mock.patch.object(self.app, "os", fake_os):
+                self.app._set_app_user_model_id()  # a refusal is passed over: only the grouping is lost
+            self.assertEqual(set_id.call_args_list, [mock.call("AngrySandhill.Tapewright")] * calls)
+        # Windows wants the ID before the program shows anything, so it is set before the window exists.
+        order = mock.Mock()
+        with mock.patch.object(self.app.tk, "Tk", order.Tk), mock.patch.object(self.app, "App"), \
+                mock.patch.object(self.app, "_enable_dpi_awareness"), \
+                mock.patch.object(self.app.config, "Settings"), \
+                mock.patch.object(self.app, "_hold_app_mutex"), \
+                mock.patch.object(self.app, "_set_app_user_model_id", order.set_id):
+            self.assertEqual(self.app.main(), 0)
+        self.assertEqual([call[0] for call in order.mock_calls[:2]], ["set_id", "Tk"])
+
+    def test_the_title_bar_cassette_is_drawn_from_its_pixels(self):
+        image = self.new_app(setup_done=True).root._cassette_icon
+        self.assertEqual((image.width(), image.height()), (48, 48))
+        for y, row in enumerate(theme.cassette_pixels(48)):
+            for x, color in enumerate(row):
+                # A pixel nothing was put into stays clear, so the title bar shows through the corners.
+                self.assertEqual(image.transparency_get(x, y), color is None, (x, y))
+                if color is not None:
+                    self.assertEqual("#{:02x}{:02x}{:02x}".format(*image.get(x, y)), color, (x, y))
 
 
 class Help(unittest.TestCase):
@@ -2727,6 +2796,13 @@ class Help(unittest.TestCase):
         app_source = (ROOT / "tapewright" / "app.py").read_text(encoding="utf-8")
         self.assertIn("help_content.UPDATES_FINISHED", app_source)
 
+    def test_the_installer_is_named_as_the_release_page_lists_it(self):
+        # Windows' warning shows the file's name, and the answer asks people to check it there.
+        for title in ("Windows warned me about it", "Updating Tapewright"):
+            topic = next(t for t in help_content.TOPICS if t["title"] == title)
+            self.assertIn("TapewrightSetup.exe", " ".join(self.texts(topic)), title)
+            self.assertIn("release_page", topic["actions"], title)
+
     @unittest.skipIf(tkinter is None, "a Python built without Tk")
     def test_every_action_has_a_handler(self):
         from tapewright import help_tab  # here, not at the top, so only this test fails if it can't import
@@ -2738,8 +2814,9 @@ class Help(unittest.TestCase):
 class License(unittest.TestCase):
     def test_every_source_file_names_the_license(self):
         self.assertTrue((ROOT / "LICENSE").is_file())
-        sources = [*ROOT.glob("tapewright/*.py"), *ROOT.glob("tests/*.py"),
-                   *ROOT.glob(".github/workflows/*.yml"), ROOT / "Tapewright.pyw"]
+        sources = [*ROOT.glob("tapewright/*.py"), *ROOT.glob("tests/*.py"), *ROOT.glob("packaging/*.py"),
+                   *ROOT.glob("packaging/*.iss"), *ROOT.glob(".github/workflows/*.yml"),
+                   ROOT / "Tapewright.pyw"]
         missing = [p.relative_to(ROOT).as_posix() for p in sorted(sources)
                    if "SPDX-License-Identifier: GPL-3.0-or-later" not in p.read_text(encoding="utf-8")[:400]]
         self.assertEqual(missing, [], "start these files with the two SPDX lines (see AGENTS.md)")
