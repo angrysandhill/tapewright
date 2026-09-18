@@ -17,15 +17,20 @@ For Windows 10 or 11, 64-bit:
 1. Open the [latest release](https://github.com/angrysandhill/tapewright/releases/latest) and,
    under **Assets**, click `TapewrightSetup.exe`. The files called *Source code* aren't needed.
 2. Open the file you downloaded. Tapewright is installed just for you, so no administrator
-   password is needed, and nothing is downloaded while it installs.
+   password is needed, and nothing is downloaded while it installs. If Tapewright has no settings
+   saved for you yet, Setup offers a tick box, *Check for updates when Tapewright starts*: untick it
+   to turn that check off. The same box on the Settings tab turns it off or on at any time (see
+   [Privacy](#privacy)).
 3. The first time Tapewright opens, it offers to download the helpers it uses (see
    [The first launch](#the-first-launch)).
 
-The installer isn't signed yet. If your browser says the file isn't commonly downloaded, choose
-*Keep*. If Windows says *Windows protected your PC*, click *More info*, check that the name beside
-*App* is `TapewrightSetup.exe`, and click *Run anyway*. If that box only offers *OK*, the computer
-blocks programs that aren't signed, for example with Smart App Control: wait for a signed release,
-or [run Tapewright from source](#running-from-source).
+The installer isn't signed yet (see [Code signing policy](#code-signing-policy)). If your browser
+says the file isn't commonly downloaded, choose *Keep*; in Microsoft Edge, click the three dots
+beside the download, then *Keep*, then *Show more* and *Keep anyway*. If Windows says *Windows
+protected your PC*, click *More info*, check that the name beside *App* is `TapewrightSetup.exe`, and
+click *Run anyway*. If that box only offers *OK*, the computer blocks programs that aren't signed,
+for example with Smart App Control: click *OK*, and [run Tapewright from source](#running-from-source)
+instead.
 
 What goes where:
 
@@ -33,7 +38,8 @@ What goes where:
   `%LOCALAPPDATA%\Programs\Tapewright`. That Python is only for Tapewright: it isn't put on `PATH`
   and doesn't change any Python you already have.
 - **The helpers Tapewright downloads**, FFmpeg and deno, go in `%LOCALAPPDATA%\Tapewright\tools`.
-- **Settings** go in `%APPDATA%\Tapewright`.
+- **Settings** go in `%APPDATA%\Tapewright`. Setup writes a settings file there only when you
+  untick its box, and never over one that is already there.
 
 **To update**, download the new `TapewrightSetup.exe` the same way and open it. The Settings tab
 says when a new version is out, and its button opens the release page. Settings and helpers are
@@ -224,8 +230,8 @@ connection couldn't be made.
 
 ## Privacy
 
-Tapewright has no telemetry: it never reports anything about you, your computer or what you
-convert. It connects only to these, and only for the reasons given:
+Tapewright has no telemetry: it never reports what you convert, and it has no account or ID for
+you. It connects only to these, and only for the reasons given:
 
 - **pypi.org**, to look up yt-dlp's newest version, and **pypi.org** and **files.pythonhosted.org**
   when pip installs or updates yt-dlp.
@@ -237,16 +243,68 @@ convert. It connects only to these, and only for the reasons given:
   GitHub's listing has no SHA-256. GitHub sends the files themselves from its own download servers.
 - **Wherever winget and `deno upgrade` connect**, when you use the Settings tab to update a copy of
   FFmpeg, deno or Node.js that winget or deno's own updater installed: winget reaches Microsoft's
-  winget source and the package's download site, and `deno upgrade` reaches deno's download servers.
+  winget source and the package's download site (github.com for FFmpeg and deno, nodejs.org for
+  Node.js), and `deno upgrade` reaches deno's download servers.
 - **The sites of the links you paste**, and the servers they send the video from, which yt-dlp
   downloads from.
 
 The version lookups and the release check run when Tapewright checks for updates: as it starts,
 unless *Check for updates when Tapewright starts* is off on the Settings tab, and when you do
-something that needs a fresh answer, such as clicking *Check for updates*. Nothing is installed or
-downloaded until you click, unless you turn on *Update yt-dlp automatically when a new version is
-out*. A button that opens a web page, such as a download page, opens it in your own web browser.
-Like any website, each of these sees your computer's internet address.
+something that needs a fresh answer, such as clicking *Check for updates*. If Tapewright has no
+settings saved for you yet, Setup offers the same tick box, so that check can be off before
+Tapewright opens. Nothing is installed or downloaded until you click, unless you turn on *Update
+yt-dlp automatically when a new version is out*. A button that opens a web page, such as a download
+page, opens it in your own web browser. Like any website, each of these sees your computer's
+internet address.
+
+Tapewright's own requests say they come from Tapewright: the update checks give its version, and
+the downloads of FFmpeg and deno say only `Tapewright-fetch`. When pip installs or updates yt-dlp,
+it tells pypi.org and files.pythonhosted.org what it tells them for anyone who uses pip: its own
+version, Python's version, the operating system's name and version (on Linux, also the distribution
+and its C library), the kind of processor, the version of OpenSSL, whether it seems to be running on
+a build server, and the versions of setuptools and Rust's compiler when that Python has setuptools
+or the compiler is on `PATH`.
+
+## Code signing policy
+
+Tapewright's Windows installer isn't signed yet. Once Tapewright has been public for a while, it
+intends to apply to [SignPath Foundation](https://signpath.org), which signs open source projects for
+free. That is a plan, not a promise, and it has no date: until a release says its installer is
+signed, it isn't.
+
+If signing is granted, these rules apply:
+
+- **Committers and reviewers:** [AngrySandhill](https://github.com/angrysandhill), the only
+  maintainer. A change from anyone else arrives as a pull request, and AngrySandhill reviews it
+  before it is merged.
+- **Approvers:** AngrySandhill, who approves every signing request by hand.
+- **What would be signed:** `TapewrightSetup.exe`, and possibly the uninstaller Inno Setup builds
+  into it. Both are built by `.github/workflows/release.yml` on GitHub's own runners, from this
+  repository.
+- **What never is:** the Python from python.org inside the installer. Its files go in as python.org
+  published them, with whatever signatures the Python Software Foundation gave them, and are never
+  sent to be signed again.
+- **Privacy:** Tapewright's own policy is [Privacy](#privacy), above. The services it contacts have
+  their own:
+  - PyPI, for pypi.org and files.pythonhosted.org: the [PyPI Privacy Notice][pypi-privacy].
+  - GitHub, for github.com and api.github.com: the [GitHub General Privacy Statement][github-privacy].
+  - gyan.dev, for www.gyan.dev: no privacy policy could be found. Its FFmpeg pages say its author
+    neither asks for nor stores personal information.
+  - deno, for dl.deno.land: Deno Land Inc.'s [Privacy Policy][deno-privacy], the one deno.com links
+    to. It names deno.com and Deno's hosting services, not dl.deno.land.
+  - Microsoft, for winget, only when you update through it: the
+    [Microsoft Privacy Statement][microsoft-privacy].
+  - OpenJS Foundation, for nodejs.org, where winget downloads Node.js from, only when you update a
+    Node.js that winget installed: the [OpenJS Foundation Privacy Policy][openjs-privacy], the one
+    nodejs.org links to. It covers the foundation's websites and its projects' sites, without naming
+    nodejs.org.
+  - The sites whose links you paste have their own policies too.
+
+[pypi-privacy]: https://policies.python.org/pypi.org/Privacy-Notice/
+[github-privacy]: https://docs.github.com/en/site-policy/privacy-policies/github-general-privacy-statement
+[deno-privacy]: https://docs.deno.com/deploy/privacy_policy/
+[microsoft-privacy]: https://www.microsoft.com/en-us/privacy/privacystatement
+[openjs-privacy]: https://privacy-policy.openjsf.org/
 
 ## When a site stops working
 
@@ -275,6 +333,7 @@ tapewright/help_tab.py      the Help tab
 tapewright/widgets.py       the log view, the banner, the warning dialog and the edit menu
 packaging/build.py          the installer's build steps: python.org's runtime, its checks, staging, sums
 packaging/runtime.json      the python.org runtime the installer carries: version, address, SHA-256, Tk
+packaging/signing.json      whether the installer is signed, which the words and release.yml follow
 packaging/tapewright.iss    the Inno Setup script that makes TapewrightSetup.exe
 packaging/make_icon.py      writes packaging/tapewright.ico from the title bar's cassette
 packaging/*.txt, *.md       the text on Setup's Information page and on the release page
@@ -296,9 +355,19 @@ GitHub Actions runs the same tests on every push, on Windows and Linux with Pyth
 `.github/workflows/release.yml` builds the Windows installer with Inno Setup. A pushed `v<version>`
 tag ends in a draft release, published by hand once it has been tried on a spare Windows account;
 *Run workflow* builds the same installer as a download from that run and releases nothing. Its
-build steps, other than the unit tests and compiling, are subcommands of `packaging/build.py`, so
-each can be run locally. Compiling needs Inno Setup 6.6 or later, and its command line is at the top
-of `packaging/tapewright.iss`.
+build steps are subcommands of `packaging/build.py`, so each can be run locally, except the unit tests,
+compiling, and the signature checks, which need PowerShell. Compiling needs Inno Setup 6.6 or later, and
+its command line is at the top of `packaging/tapewright.iss`.
+
+`packaging/signing.json` is the one switch for signing, and the release workflow follows it. Tests
+hold README, the release notes and Help to it by looking for particular phrases, not for every way
+of saying something. While it is false, all three must call the installer unsigned, none may carry
+SignPath's attribution line in any markup or capitals, the release notes and Help may not name
+SignPath at all, and README may not claim that the installer has been signed or name who signed it.
+Once it is true, README must carry the attribution, all three must name SignPath Foundation, none
+may still call the installer unsigned, and the Code signing policy must drop its plan to apply. The
+signing steps in `release.yml` stay skipped until SignPath's repository variables and secret exist;
+[AGENTS.md](AGENTS.md) has the details.
 
 Read [AGENTS.md](AGENTS.md) before changing anything in `jobs.py`, `procs.py`, `deps.py`,
 `fetch.py`, `app.py`, `setup_screen.py` or `packaging/`. Each rule in it exists because breaking it

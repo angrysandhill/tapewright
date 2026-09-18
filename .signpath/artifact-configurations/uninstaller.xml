@@ -1,0 +1,22 @@
+<!--
+SPDX-FileCopyrightText: 2026 AngrySandhill
+SPDX-License-Identifier: GPL-3.0-or-later
+
+SignPath doesn't read this file. It is a copy, kept here for review, of the artifact configuration entered in
+the SignPath project under the slug "uninstaller", which .github/workflows/release.yml names when it sends
+Inno Setup's uninstaller; change the two together. build.py uninstaller-out uploads that uninst-*.e32 as
+uninstaller.exe, because SignPath's pe-file reference lists .exe and not .e32. Inno Setup writes the same
+version information into it as into Setup, so it carries the same restriction as installer.xml: the product
+name Tapewright and the version release.yml passes. upload-artifact zips what it uploads, so the root is a
+zip-file.
+-->
+<artifact-configuration xmlns="http://signpath.io/artifact-configuration/v1">
+  <parameters>
+    <parameter name="version" required="true" />
+  </parameters>
+  <zip-file>
+    <pe-file path="uninstaller.exe" product-name="Tapewright" product-version="${version}">
+      <authenticode-sign />
+    </pe-file>
+  </zip-file>
+</artifact-configuration>

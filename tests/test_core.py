@@ -2803,6 +2803,35 @@ class Help(unittest.TestCase):
             self.assertIn("TapewrightSetup.exe", " ".join(self.texts(topic)), title)
             self.assertIn("release_page", topic["actions"], title)
 
+    def test_the_browser_steps_are_the_ones_microsoft_documents_for_edge(self):
+        # Microsoft Learn gives Edge's way to keep a download it doesn't know as the three dots beside it,
+        # then Keep, Show more and Keep anyway. Help, README and the release notes each tell people how to
+        # download the installer, so each names all three, in that order.
+        topic = next(t for t in help_content.TOPICS if t["title"] == "Updating Tapewright")
+        places = {
+            "Help": " ".join(self.texts(topic)),
+            "README.md": (ROOT / "README.md").read_text(encoding="utf-8"),
+            "release-notes.md": (ROOT / "packaging" / "release-notes.md").read_text(encoding="utf-8"),
+        }
+        for name, text in places.items():
+            self.assertIn("Microsoft Edge", text, name)
+            after = text[text.index("Microsoft Edge"):]
+            self.assertEqual(re.findall(r"Keep anyway|Show more|Keep", after)[:3],
+                             ["Keep", "Show more", "Keep anyway"], name)
+
+    def test_a_blocked_installer_points_to_the_source_and_promises_no_signed_version(self):
+        # Nobody can say when, or whether, the installer will be signed. Where Smart App Control leaves
+        # only OK, the way on is running Tapewright from source, never waiting for a signature.
+        topic = next(t for t in help_content.TOPICS if t["title"] == "Windows warned me about it")
+        self.assertIn("source code", " ".join(self.texts(topic)))
+        places = {
+            "Help": " ".join(text for topic in help_content.TOPICS for text in self.texts(topic)),
+            "README.md": (ROOT / "README.md").read_text(encoding="utf-8"),
+            "release-notes.md": (ROOT / "packaging" / "release-notes.md").read_text(encoding="utf-8"),
+        }
+        for name, text in places.items():
+            self.assertNotIn("wait for a signed", text.lower(), name)
+
     @unittest.skipIf(tkinter is None, "a Python built without Tk")
     def test_every_action_has_a_handler(self):
         from tapewright import help_tab  # here, not at the top, so only this test fails if it can't import
@@ -2816,7 +2845,7 @@ class License(unittest.TestCase):
         self.assertTrue((ROOT / "LICENSE").is_file())
         sources = [*ROOT.glob("tapewright/*.py"), *ROOT.glob("tests/*.py"), *ROOT.glob("packaging/*.py"),
                    *ROOT.glob("packaging/*.iss"), *ROOT.glob(".github/workflows/*.yml"),
-                   ROOT / "Tapewright.pyw"]
+                   *ROOT.glob(".signpath/artifact-configurations/*.xml"), ROOT / "Tapewright.pyw"]
         missing = [p.relative_to(ROOT).as_posix() for p in sorted(sources)
                    if "SPDX-License-Identifier: GPL-3.0-or-later" not in p.read_text(encoding="utf-8")[:400]]
         self.assertEqual(missing, [], "start these files with the two SPDX lines (see AGENTS.md)")

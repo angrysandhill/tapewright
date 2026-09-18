@@ -11,22 +11,26 @@ import contextlib
 import hashlib
 import importlib.util
 import io
+import itertools
 import json
+import os
 import re
 import struct
 import sys
 import tempfile
 import unittest
+import urllib.parse
 import zipfile
 import zlib
 from pathlib import Path
 from unittest import mock
+from xml.etree import ElementTree
 
 ROOT = Path(__file__).resolve().parents[1]
 PACKAGING = ROOT / "packaging"
 sys.path.insert(0, str(ROOT))
 
-from tapewright import __version__, procs  # noqa: E402
+from tapewright import APP_NAME, __version__, config, deps, help_content, procs  # noqa: E402
 
 try:  # only the committed icon's test draws with theme, which imports tkinter
     import tkinter  # noqa: F401
@@ -37,6 +41,8 @@ else:  # outside the try, so an ImportError from Tapewright's own modules fails 
 
 URL = "https://www.python.org/ftp/python/3.14.6/python-3.14.6-amd64.zip"
 SHA = "75afa83f93b284d19040e24bc440ab741c09582c0d5310504d607a4e08c3dbaf"
+VER_CHECK = object()  # Script's mark for an open #if Ver block, which no #ifdef name can equal
+SIGNPATH_NS = "{http://signpath.io/artifact-configuration/v1}"  # the namespace SignPath's reference gives
 
 
 def _load(name):
@@ -58,30 +64,57 @@ def _params(line):
 
 
 class Script:
-    """The .iss as the tests read it: its defines, [Setup]'s directives and the other sections' entries."""
+    """The .iss as the tests read it: its defines, [Setup]'s directives, the other sections' entries, and in
+    conditional[NAME] the [Setup] directives between #ifdef NAME and #endif, which ISCC reads only when given
+    /DNAME.
+    """
 
     def __init__(self):
         self.text = (PACKAGING / "tapewright.iss").read_text(encoding="utf-8")
-        self.defines, self.setup, self.entries = {}, {}, {}
-        section, pending = None, ""
+        self.defines, self.setup, self.entries, self.conditional = {}, {}, {}, {}
+        self.needs_inno, self.too_old = None, None  # the #if Ver check's oldest Inno Setup, and its #error
+        # blocks: each open #ifdef's name, None for #ifndef, or VER_CHECK for the compiler version check
+        section, pending, blocks = None, "", []
         for raw in self.text.splitlines():
             if raw.endswith(" \\"):  # the preprocessor's line spanning
                 pending += raw[:-1].strip() + " "
                 continue
             line, pending = pending + raw.strip(), ""
             define = re.fullmatch(r'#define (\w+) "(.*)"', line)
-            if define:
+            opened = re.fullmatch(r"#(ifn?def) (\w+)", line)
+            needs = re.fullmatch(r"#if Ver < EncodeVer\((\d+), (\d+), (\d+)\)", line)
+            if opened:
+                blocks.append(opened[2] if opened[1] == "ifdef" else None)
+            elif needs:
+                self.needs_inno = tuple(int(part) for part in needs.groups())
+                blocks.append(VER_CHECK)
+            elif line == "#endif":
+                blocks.pop()
+            elif not line or line.startswith(";") or section == "Code" and not line.startswith("["):
+                continue
+            elif blocks and not (define if blocks[-1] is None
+                                 else line.startswith("#error ") if blocks[-1] is VER_CHECK
+                                 else section == "Setup" and re.fullmatch(r"\w+=.*", line)):
+                # Only the shapes the script uses are read: a default #define inside #ifndef, a [Setup]
+                # directive inside #ifdef and an #error inside the version check. Anything else fails here
+                # instead of being misread.
+                raise AssertionError("tests/test_packaging.py can't read this inside an #if: " + line)
+            elif line.startswith("#error "):
+                assert blocks, "an #error outside any #if stops every compile"
+                self.too_old = line[len("#error "):]
+            elif define:
                 self.defines[define[1]] = define[2]
-            elif not line or line.startswith((";", "#")) or section == "Code" and not line.startswith("["):
+            elif line.startswith("#"):
                 continue
             elif re.fullmatch(r"\[\w+\]", line):
                 section = line[1:-1]
                 self.entries.setdefault(section, [])
             elif section == "Setup":
                 key, _, value = line.partition("=")
-                self.setup[key] = value
+                (self.conditional.setdefault(blocks[-1], {}) if blocks else self.setup)[key] = value
             else:
                 self.entries[section].append(_params(line))
+        assert not blocks, "an #ifdef or #ifndef with no #endif"
 
 
 def _app_constant(name):
@@ -90,6 +123,92 @@ def _app_constant(name):
         if isinstance(node, ast.Assign) and [getattr(t, "id", None) for t in node.targets] == [name]:
             return ast.literal_eval(node.value)
     raise AssertionError("app.py assigns no " + name)
+
+
+def _settings_label(key):
+    """The words beside the Settings tab's tick box for a setting, read with ast, so no tkinter is needed."""
+    source = (ROOT / "tapewright" / "settings_tab.py").read_text(encoding="utf-8")
+    for node in ast.walk(ast.parse(source)):
+        if (isinstance(node, ast.Call) and getattr(node.func, "attr", None) == "_check" and len(node.args) > 3
+                and isinstance(node.args[3], ast.Constant) and node.args[3].value == key):
+            return ast.literal_eval(node.args[2])
+    raise AssertionError("the Settings tab has no tick box for " + key)
+
+
+def _lookup_hosts():
+    """The hosts of the addresses deps.py's checks look up, from each fetch_text(ADDRESS, ...) call there."""
+    source = (ROOT / "tapewright" / "deps.py").read_text(encoding="utf-8")
+    calls = [node for node in ast.walk(ast.parse(source))
+             if isinstance(node, ast.Call) and getattr(node.func, "id", None) == "fetch_text"]
+    assert calls and all(isinstance(call.args[0], ast.Name) for call in calls), "a lookup it can't read"
+    return {urllib.parse.urlsplit(getattr(deps, call.args[0].id)).hostname for call in calls}
+
+
+def _steps(text):
+    """release.yml's steps in order, as the tests read them: each a dict of its keys, where env: and with: are
+    dicts too and a block scalar is its lines joined ("|" by line breaks, ">-" by spaces), plus "text", the
+    step's own lines without YAML comments. Only the shapes release.yml uses are read, so any other line fails
+    here instead of being misread.
+    """
+    # levels holds (the indent of a mapping's keys, the mapping) for each open mapping, innermost last.
+    steps, levels, block = [], [], None
+
+    def close():
+        block["into"][block["key"]] = block["join"].join(block["lines"]).strip()
+
+    for raw in text.split("\n    steps:\n", 1)[1].splitlines():
+        indent = len(raw) - len(raw.lstrip(" "))
+        if block:
+            if not raw.strip() or indent > block["indent"]:
+                block["lines"].append(raw[block["indent"] + 2:])
+                steps[-1]["text"] += raw + "\n"
+                continue
+            close()
+            block = None
+        if not raw.strip() or raw.lstrip().startswith("#"):
+            continue
+        if raw.startswith("      - "):
+            steps.append({"text": ""})
+            levels = [(8, steps[-1])]
+            raw, indent = " " * 8 + raw[8:], 8
+        found = re.fullmatch(r" *([\w-]+):(?: +(.*?))?(?: +#.*)?", raw)
+        while levels and levels[-1][0] > indent:
+            levels.pop()
+        assert found and levels and levels[-1][0] == indent, "tests/test_packaging.py can't read this: " + raw
+        key, value = found.groups()
+        mapping = levels[-1][1]
+        steps[-1]["text"] += raw + "\n"
+        if value is None:
+            mapping[key] = {}
+            levels.append((indent + 2, mapping[key]))
+        elif value in ("|", ">-"):
+            block = {"into": mapping, "key": key, "indent": indent, "lines": [],
+                     "join": "\n" if value == "|" else " "}
+        else:
+            mapping[key] = value
+    if block:
+        close()
+    return steps
+
+
+def _prose(markdown):
+    """Markdown as it reads: an inline link as its words, and any run of spaces and line breaks as one."""
+    return " ".join(re.sub(r"\[([^\]]*)\]\([^)]*\)", r"\1", markdown).split())
+
+
+def _section(markdown, heading):
+    """What a Markdown file says under one "## " heading, up to the next."""
+    found = re.search(rf"^## {re.escape(heading)}\n(.*?)(?=^## |\Z)", markdown, re.M | re.S)
+    assert found, "no ## " + heading
+    return found[1]
+
+
+def _help_words(topics):
+    """Every string in these Help topics, joined by spaces, so a sentence split across strings is found."""
+    if isinstance(topics, str):
+        return topics
+    values = topics.values() if isinstance(topics, dict) else topics
+    return " ".join(" ".join(_help_words(value) for value in values).split())
 
 
 class Installer(unittest.TestCase):
@@ -111,13 +230,20 @@ class Installer(unittest.TestCase):
                          ["{autoprograms}\\Tapewright", "{autodesktop}\\Tapewright"])
         self.assertEqual({icon["AppUserModelID"] for icon in icons}, {_app_constant("APP_USER_MODEL_ID")})
         self.assertEqual(icons[1]["Tasks"], "desktopicon")
-        self.assertEqual([task["Name"] for task in self.iss.entries["Tasks"]], ["desktopicon"])
 
     def test_it_installs_for_one_user_in_a_folder_they_can_write_to(self):
         self.assertEqual(self.iss.setup["PrivilegesRequired"], "lowest")
         self.assertNotIn("PrivilegesRequiredOverridesAllowed", self.iss.setup)
         self.assertTrue(self.iss.setup["DefaultDirName"].startswith("{autopf}\\"))
         self.assertEqual(self.iss.setup["DisableDirPage"], "yes")
+
+    def test_the_script_itself_refuses_an_inno_setup_older_than_6_6(self):
+        # WizardStyle's dark mode arrived in 6.6.0. The check is the preprocessor's, because Inno Setup's own
+        # programs carry no version Windows can read, so release.yml can't make it (see Workflow).
+        self.assertEqual(self.iss.needs_inno, (6, 6, 0))
+        self.assertIn("6.6", self.iss.too_old)
+        self.assertEqual(self.iss.setup["WizardStyle"], "modern dark")
+        self.assertLess(self.iss.text.index("#if Ver"), self.iss.text.index("[Setup]"))
 
     def test_the_names_that_must_never_change(self):
         self.assertEqual(self.iss.setup["AppId"], "{{C7E317BA-41A6-4ADE-ABE5-173A5DAC0058}")
@@ -180,6 +306,97 @@ class Installer(unittest.TestCase):
         self.assertEqual(removed["{localappdata}\\Tapewright\\tools"], "filesandordirs")
         self.assertEqual(removed["{app}\\runtime"], "filesandordirs")
         self.assertFalse([name for name in removed if "appdata}" in name and "{localappdata}" not in name])
+
+    def test_the_version_info_names_tapewright_and_the_version_it_installs(self):
+        # Inno Setup's own defaults, written out, since a signing policy can hold both (see AGENTS.md).
+        self.assertEqual(self.iss.setup["AppName"], APP_NAME)
+        self.assertEqual(self.iss.setup["VersionInfoProductName"], self.iss.setup["AppName"])
+        for directive in ("AppVersion", "VersionInfoVersion", "VersionInfoProductVersion"):
+            with self.subTest(directive):
+                self.assertEqual(self.iss.setup[directive], "{#AppVersion}")
+
+    def test_the_uninstaller_is_signed_only_when_the_compiler_is_told_to(self):
+        self.assertEqual(list(self.iss.conditional), ["SignUninstaller"])
+        signed = self.iss.conditional["SignUninstaller"]
+        self.assertEqual(set(signed), {"SignedUninstaller", "SignedUninstallerDir"})
+        self.assertEqual(signed["SignedUninstaller"], "yes")
+        # Without /DSignUninstaller nothing defines the name, and no Sign* directive, SignTool included, is
+        # set anywhere else.
+        self.assertNotIn("SignUninstaller", self.iss.defines)
+        self.assertFalse([key for key in self.iss.setup if key.lower().startswith("sign")])
+        self.assertEqual(len(re.findall(r"^\s*Sign\w*\s*=", self.iss.text, re.M | re.I)), len(signed))
+        # The unsigned copy ISCC leaves to be signed stays out of dist/, which release.yml uploads.
+        folder = (PACKAGING / signed["SignedUninstallerDir"].replace("\\", "/")).resolve()
+        self.assertIn(build.BUILD, folder.parents)
+        self.assertNotIn(build.DIST, [folder, *folder.parents])
+
+    def test_setup_offers_the_start_up_check_in_the_settings_tabs_words_while_there_are_no_settings(self):
+        tasks = {task["Name"]: task for task in self.iss.entries["Tasks"]}
+        self.assertEqual(list(tasks), ["desktopicon", "startupcheck"])
+        offered = tasks["startupcheck"]
+        self.assertEqual(offered["Description"], _settings_label("check_on_startup"))
+        # Offered only while there is no settings file, and ticked, which leaves the check on as config's
+        # default has it.
+        self.assertEqual(offered["Check"], "NoSettingsYet")
+        self.assertIn("function NoSettingsYet(): Boolean;", self.iss.text)
+        self.assertNotIn("Flags", offered)
+        self.assertIs(config.DEFAULTS["check_on_startup"], True)
+
+    def test_unticked_setup_writes_a_settings_file_tapewright_reads_whole(self):
+        code = self.iss.text.split("\n[Code]\n", 1)[1]
+        literals = re.findall(r"'(\{\"[^']*\})'", code)  # a JSON object, not an inline {#define}
+        self.assertEqual(len(literals), 1)
+        self.assertEqual(json.loads(literals[0]), {"check_on_startup": False})
+        self.assertTrue(config._valid("check_on_startup", False))
+        # Only after installing, and only with the box unticked. A file already there is only read, a missing
+        # one is written, and the message follows when either doesn't work out.
+        self.assertIn("if (CurStep = ssPostInstall) and NoSettingsYet() and not "
+                      "WizardIsTaskSelected('startupcheck') then", code)
+        body = " ".join(code.split("procedure CurStepChanged(CurStep: TSetupStep);", 1)[1].split())
+        found = re.search(
+            r"if FileExists\(Settings\) then Done := LoadStringFromFile\(Settings, Content\) "
+            r"and \(Pos\('([^']*)', Content\) > 0\) "
+            r"else Done := ForceDirectories\(ExtractFileDir\(Settings\)\) "
+            r"and SaveStringToFile\(Settings, '([^']*)' \+ #10, False\); "
+            r"if not Done then SuppressibleMsgBox\(", body)
+        self.assertIsNotNone(found, "CurStepChanged isn't shaped as this test reads it")
+        wanted, written = found.groups()
+        self.assertEqual(written, literals[0])
+        self.assertEqual(code.count("SaveStringToFile("), 1)
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "settings.json"
+            path.write_text(literals[0] + "\n", encoding="utf-8")
+            settings = config.Settings(path)
+            settings.load()
+            self.assertIsNone(settings.problem)
+            self.assertEqual(settings.data, dict(config.DEFAULTS, check_on_startup=False))
+            self.assertIs(settings["setup_done"], False)  # so the setup screen still opens
+            # Tapewright's own save holds the words Setup looks for, in the bytes LoadStringFromFile reads,
+            # only when its check is off, so a file it wrote on closing with the check on gets the message.
+            for check in (False, True):
+                with self.subTest(check_on_startup=check):
+                    settings["check_on_startup"] = check
+                    self.assertIsNone(settings.save())
+                    self.assertIs(wanted.encode("ascii") in path.read_bytes(), not check)
+
+    def test_setup_looks_for_the_settings_file_where_tapewright_keeps_it(self):
+        self.assertIn("GetEnv('TAPEWRIGHT_CONFIG_DIR')", self.iss.text)
+        self.assertIn("AddBackslash(Result) + 'settings.json'", self.iss.text)
+        self.assertIn("ExpandConstant('{userappdata}\\" + APP_NAME + "\\settings.json')", self.iss.text)
+        elsewhere = str(ROOT / "no-such-folder")
+        with mock.patch.dict(os.environ, {"TAPEWRIGHT_CONFIG_DIR": elsewhere}):
+            self.assertEqual(config.Settings().path, Path(elsewhere) / "settings.json")
+        if os.name == "nt":  # {userappdata} is %APPDATA%; an empty variable counts as unset, as with GetEnv
+            with mock.patch.dict(os.environ, {"TAPEWRIGHT_CONFIG_DIR": "", "APPDATA": elsewhere}):
+                self.assertEqual(config.Settings().path, Path(elsewhere) / APP_NAME / "settings.json")
+
+    def test_setups_information_page_says_what_the_check_at_start_asks(self):
+        text = (PACKAGING / "before-install.txt").read_text(encoding="utf-8")
+        self.assertIn(_settings_label("check_on_startup"), text)
+        for host in sorted(_lookup_hosts()):
+            with self.subTest(host):
+                self.assertIn(host, text)
+        self.assertIsNone(re.search(r"[^\n]\n[^\n]", text), "one line per paragraph")
 
 
 class Pin(unittest.TestCase):
@@ -406,17 +623,245 @@ class Build(unittest.TestCase):
                 failed = failures(answer, pip_line, files)
                 self.assertEqual(len(failed), count, failed)
 
+    def test_signing_json_is_one_boolean(self):
+        # Read as text, so a checkout that turns its line break into \r\n still passes. A byte order mark
+        # survives reading and fails the \A\{.
+        data = (PACKAGING / "signing.json").read_text(encoding="utf-8")
+        self.assertRegex(data, r'\A\{"installer_signed": (true|false)\}\n\Z')
+        self.assertIs(build.load_signing(), json.loads(data)["installer_signed"])
+        self.assertEqual(build.SIGNING, PACKAGING / "signing.json")
+        wrong = ('{"installer_signed": "false"}', '{"installer_signed": 0}', '{"installer_signed": null}',
+                 '{"installer_signed": false, "signed": true}', '{"Installer_signed": false}', "{}",
+                 "[false]", "false", '{"installer_signed": false', "", '\ufeff{"installer_signed": false}')
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "signing.json"
+            for text, answer in (('{"installer_signed": true}\n', True),
+                                 ('{"installer_signed": false}', False)):
+                path.write_text(text, encoding="utf-8")
+                self.assertIs(build.load_signing(path), answer)
+            for text in wrong:
+                with self.subTest(text=text):
+                    path.write_text(text, encoding="utf-8")
+                    with self.assertRaises(build.BuildError):
+                        build.load_signing(path)
+
+    def test_the_signing_plan_for_each_kind_of_run(self):
+        organization, project, test, release, uninstaller = build.SIGNPATH_VARIABLES
+        configured = {organization: "0f5c7e1a-organization", project: "tapewright", test: "test-signing",
+                      release: "release-signing"}
+
+        def plan(mode="none", policy="", signs_uninstaller="false"):
+            return {"mode": mode, "policy": policy, "uninstaller": signs_uninstaller}
+
+        releasing, testing = plan("release", "release-signing"), plan("test", "test-signing")
+        rows = [
+            # A tag push stays unsigned while signing.json says so, whatever is set.
+            ("push", False, {}, plan()),
+            ("push", False, dict(configured, **{uninstaller: "true"}), plan()),
+            ("push", False, {uninstaller: "yes"}, plan()),
+            # Once it says signed, the release policy, and never the test one.
+            ("push", True, configured, releasing),
+            ("push", True, {organization: "o", project: "p", release: "release-signing"}, releasing),
+            ("push", True, dict(configured, **{uninstaller: "true"}),
+             plan("release", "release-signing", "true")),
+            ("push", True, dict(configured, **{uninstaller: "false"}), releasing),
+            ("push", True, dict(configured, **{uninstaller: ""}), releasing),
+            # A manual run test-signs when SignPath is configured, whatever signing.json says, and never with
+            # the release policy. With none of it configured, it builds unsigned.
+            ("workflow_dispatch", False, configured, testing),
+            ("workflow_dispatch", True, configured, testing),
+            ("workflow_dispatch", False, {organization: "o", project: "p", test: "test-signing"}, testing),
+            ("workflow_dispatch", True, dict(configured, **{uninstaller: "true"}),
+             plan("test", "test-signing", "true")),
+            ("workflow_dispatch", True, {}, plan()),
+            ("workflow_dispatch", False, {organization: "", project: "", test: ""}, plan()),
+            ("workflow_dispatch", True, {release: "release-signing"}, plan()),
+            ("workflow_dispatch", False, {uninstaller: "true"}, plan()),
+        ]
+        for event, signed, env, expected in rows:
+            with self.subTest(event=event, signed=signed, env=env):
+                self.assertEqual(build.signing_plan(event, signed, env), expected)
+        refused = [
+            ("push", True, {}, [organization, project, release]),
+            ("push", True, {organization: "o", project: "p", test: "test-signing"}, [release]),
+            ("push", True, dict(configured, **{uninstaller: "True"}), [uninstaller]),
+            ("push", True, dict(configured, **{uninstaller: "yes"}), [uninstaller]),
+            ("workflow_dispatch", False, {organization: "o", project: "p"}, [test]),
+            ("workflow_dispatch", True, {test: "test-signing", release: "release-signing"},
+             [organization, project]),
+            ("workflow_dispatch", False, dict(configured, **{uninstaller: "1"}), [uninstaller]),
+            ("workflow_dispatch", False, dict(configured, **{test: "test-signing\nmode=none"}),
+             ["line break"]),
+            ("pull_request", True, configured, ["pull_request"]),
+            ("schedule", False, {}, ["schedule"]),
+            ("Push", True, configured, ["Push"]),
+        ]
+        for event, signed, env, named in refused:
+            with self.subTest(event=event, signed=signed, env=env):
+                with self.assertRaises(build.BuildError) as raised:
+                    build.signing_plan(event, signed, env)
+                for name in named:
+                    self.assertIn(name, str(raised.exception))
+
+    def test_a_policy_is_only_ever_the_one_for_its_kind_of_run(self):
+        names = build.SIGNPATH_VARIABLES
+        seen = set()
+        for event, signed, chosen, uninstaller in itertools.product(
+                ("push", "workflow_dispatch"), (False, True), itertools.product((False, True), repeat=4),
+                ("", "false", "true", "yes")):
+            env = {name: name.lower() for name, on in zip(names, chosen) if on}
+            env[names[4]] = uninstaller
+            try:
+                plan = build.signing_plan(event, signed, env)
+            except build.BuildError:
+                seen.add((event, signed, "refused"))
+                continue
+            seen.add((event, signed, plan["mode"]))
+            with self.subTest(event=event, signed=signed, env=env):
+                self.assertEqual(plan["mode"] == "release", event == "push" and signed)
+                kinds = {"push": ("none", "release"), "workflow_dispatch": ("none", "test")}
+                self.assertIn(plan["mode"], kinds[event])
+                policy = {"none": "", "test": env.get(names[2]), "release": env.get(names[3])}[plan["mode"]]
+                self.assertEqual(plan["policy"], policy)
+                self.assertEqual(plan["uninstaller"],
+                                 "true" if plan["mode"] != "none" and uninstaller == "true" else "false")
+        # An unsigned tag push always builds unsigned, a signed one signs or is refused, and a manual run can
+        # do any of the three.
+        self.assertEqual(seen, {("push", False, "none"), ("push", True, "release"), ("push", True, "refused"),
+                                ("workflow_dispatch", False, "none"), ("workflow_dispatch", False, "test"),
+                                ("workflow_dispatch", False, "refused"), ("workflow_dispatch", True, "none"),
+                                ("workflow_dispatch", True, "test"), ("workflow_dispatch", True, "refused")})
+
+    def test_signing_on_the_command_line(self):
+        organization, project, test, release, uninstaller = build.SIGNPATH_VARIABLES
+        with tempfile.TemporaryDirectory() as folder:
+            flag = Path(folder) / "signing.json"
+
+            def run(event, signed, variables):
+                flag.write_text(json.dumps({"installer_signed": signed}), encoding="utf-8")
+                environment = dict(dict.fromkeys(build.SIGNPATH_VARIABLES, ""), **variables)
+                out, err = io.StringIO(), io.StringIO()
+                with mock.patch.object(build, "SIGNING", flag), mock.patch.dict(os.environ, environment):
+                    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                        code = build.main(["signing", "--event", event])
+                return code, out.getvalue(), err.getvalue()
+
+            code, out, err = run("push", False, {organization: "o", project: "p", release: "release-signing"})
+            self.assertEqual((code, out), (0, "mode=none\npolicy=\nuninstaller=false\n"))
+            self.assertIn("isn't signed", err)
+            code, out, err = run("workflow_dispatch", False,
+                                 {organization: "o", project: "p", test: "test-signing", uninstaller: "true"})
+            self.assertEqual((code, out), (0, "mode=test\npolicy=test-signing\nuninstaller=true\n"))
+            self.assertIn("test-signing", err)
+            code, out, err = run("push", True, {organization: "o", project: "p", release: "release-signing"})
+            self.assertEqual((code, out), (0, "mode=release\npolicy=release-signing\nuninstaller=false\n"))
+            # A refusal prints no output line, so the step fails before any signing step can read one.
+            code, out, err = run("push", True, {})
+            self.assertEqual((code, out), (1, ""))
+            self.assertIn(release, err)
+            flag.write_text('{"installer_signed": "yes"}', encoding="utf-8")
+            with mock.patch.object(build, "SIGNING", flag), contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(build.main(["signing", "--event", "workflow_dispatch"]), 1)
+
+    def test_the_uninstaller_goes_out_to_be_signed_and_back_under_its_own_name(self):
+        unsigned = b"MZ" + bytes(range(256)) * 40
+        signed = unsigned + b"a certificate table"
+        name = "uninst-6.7.1-0123456789.e32"
+        with tempfile.TemporaryDirectory() as folder:
+            folder = Path(folder)
+            made, out = folder / "uninstaller", folder / "sign" / "uninstaller"
+            back = folder / build.UNINSTALLER_NAME
+            stdout, stderr = io.StringIO(), io.StringIO()
+
+            def run(*argv):
+                with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                    return build.main(list(argv))
+
+            copy_out = ("uninstaller-out", "--dir", str(made), "--out", str(out))
+            put_back = ("uninstaller-in", "--signed", str(back), "--dir", str(made))
+            # No folder, then an empty one: refused, and no --out folder made.
+            self.assertEqual(run(*copy_out), 1)
+            made.mkdir()
+            self.assertEqual(run(*copy_out), 1)
+            self.assertFalse(out.exists())
+            (made / name).write_bytes(unsigned)
+            # What ISCC writes first and then renames, which isn't a second copy.
+            (made / (name + ".tmp")).write_bytes(unsigned)
+            self.assertEqual(run(*copy_out), 0)
+            self.assertEqual([path.name for path in out.iterdir()], [build.UNINSTALLER_NAME])
+            self.assertEqual((out / build.UNINSTALLER_NAME).read_bytes(), unsigned)
+            self.assertIn(name, stdout.getvalue())
+            self.assertEqual(run(*copy_out), 1)  # only into a fresh folder
+            # Refused, leaving the unsigned file as it was: no signed file, one that isn't a program, and one
+            # no larger than the unsigned file.
+            for what, content in (("no file", None), ("not a program", b"PK" + signed[2:]),
+                                  ("the same size", unsigned), ("smaller", unsigned[:-1])):
+                with self.subTest(what):
+                    if content is not None:
+                        back.write_bytes(content)
+                    self.assertEqual(run(*put_back), 1)
+                    self.assertEqual((made / name).read_bytes(), unsigned)
+            back.write_bytes(signed)
+            second = made / "uninst-6.7.1-9876543210.e32"
+            second.write_bytes(unsigned)
+            self.assertEqual(run(*put_back), 1)  # two, and no telling which one the next compile looks for
+            self.assertEqual(run("uninstaller-out", "--dir", str(made), "--out", str(folder / "other")), 1)
+            second.unlink()
+            self.assertEqual(run(*put_back), 0)
+            self.assertEqual((made / name).read_bytes(), signed)
+            self.assertEqual(sorted(path.name for path in made.iterdir()), [name, name + ".tmp"])
+        for message in ("exactly one", "isn't empty", "there is no signed uninstaller",
+                        "doesn't start with MZ", "carries no signature"):
+            self.assertIn(message, stderr.getvalue())
+
 
 class Workflow(unittest.TestCase):
+    ACTION = "signpath/github-action-submit-signing-request@f6d04783b4569d051e0c80105fe66e82819d0092"
+    PUSH = "github.event_name == 'push'"
+    SIGNS = "steps.signing.outputs.mode != 'none'"
+    SIGNS_UNINSTALLER = "steps.signing.outputs.uninstaller == 'true'"
+    # Every step after checkout and setup-python, in the order they must run: a name for it here, a pattern
+    # only that step matches, and the if: it runs under.
+    ORDER = [
+        ("check-tag", r"run: python packaging/build\.py check-tag ", PUSH),
+        ("versions", r"run: python packaging/build\.py versions ", None),
+        ("signing", r"run: python packaging/build\.py signing ", None),
+        ("runtime", r"run: python packaging/build\.py runtime$", None),
+        ("check", r"run: python packaging/build\.py check$", None),
+        ("report", r"Resolve-Path build\\runtime", None),
+        ("unit tests", r"build\\runtime\\python\.exe -m unittest", None),
+        ("mark", r"run: python packaging/build\.py mark$", None),
+        ("stage", r"run: python packaging/build\.py stage$", None),
+        ("inno", r"^        id: inno$", None),
+        ("first compile", r"please attach your digital signature", SIGNS_UNINSTALLER),
+        ("uninstaller-out", r"run: python packaging/build\.py uninstaller-out$", SIGNS_UNINSTALLER),
+        ("uninstaller upload", r"^        id: unsigned-uninstaller$", SIGNS_UNINSTALLER),
+        ("uninstaller signing", r"^          artifact-configuration-slug: uninstaller$", SIGNS_UNINSTALLER),
+        ("uninstaller check", r"^          SIGNED: build\\signed-uninstaller\\", SIGNS_UNINSTALLER),
+        ("uninstaller-in", r"run: python packaging/build\.py uninstaller-in ", SIGNS_UNINSTALLER),
+        ("compile", r"^\s*& \$env:ISCC @defines packaging\\tapewright\.iss$", None),
+        ("unsigned upload", r"^        id: unsigned$", SIGNS),
+        ("installer signing", r"^          artifact-configuration-slug: installer$", SIGNS),
+        ("installer check", r"^          SIGNED: build\\signed\\TapewrightSetup\.exe$", SIGNS),
+        ("sums", r"run: python packaging/build\.py sums ", None),
+        ("upload", r"^          name: TapewrightSetup$", None),
+        ("attest", r"uses: actions/attest@", PUSH),
+        ("release", r"gh release create", PUSH),
+    ]
+
     @classmethod
     def setUpClass(cls):
         cls.text = (ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
-        cls.steps = cls.text.split("\n    steps:\n", 1)[1].split("\n      - ")
+        cls.steps = _steps(cls.text)
 
-    def step(self, pattern):
-        found = [index for index, step in enumerate(self.steps) if re.search(pattern, step, re.M)]
-        self.assertTrue(found, "no step matches " + pattern)
+    def find(self, label):
+        pattern = {name: pattern for name, pattern, _ in self.ORDER}[label]
+        found = [index for index, step in enumerate(self.steps) if re.search(pattern, step["text"], re.M)]
+        self.assertEqual(len(found), 1, f"{label}: {len(found)} steps match {pattern}")
         return found[0]
+
+    def step(self, label):
+        return self.steps[self.find(label)]
 
     def test_it_calls_every_build_step_and_no_other(self):
         names = set(re.findall(r"run: python packaging/build\.py ([\w-]+)", self.text))
@@ -428,37 +873,317 @@ class Workflow(unittest.TestCase):
                 self.assertEqual(done.exception.code, 0)
 
     def test_the_steps_run_in_the_order_the_installer_needs(self):
-        order = [r"build\.py check-tag", r"build\.py versions", r"build\.py runtime$", r"build\.py check$",
-                 r"build\\runtime\\python\.exe -m unittest", r"build\.py mark$", r"build\.py stage$", r"ISCC",
-                 r"build\.py sums", r"uses: actions/upload-artifact@", r"uses: actions/attest@",
-                 r"gh release create"]
-        indexes = [self.step(pattern) for pattern in order]
-        self.assertEqual(indexes, sorted(set(indexes)))
+        self.assertEqual([step.get("uses", "").split("@")[0] for step in self.steps[:2]],
+                         ["actions/checkout", "actions/setup-python"])
+        self.assertEqual([self.find(label) for label, _, _ in self.ORDER], list(range(2, len(self.steps))))
+
+    def test_each_step_runs_only_under_its_condition(self):
+        # The tag check, attestation and release only on a push; the uninstaller's pass only when it is
+        # signed too, and the rest of signing whenever this run signs; everything else always, the runtime,
+        # the compile and the final upload included. signing_plan never signs the uninstaller on a run that
+        # signs nothing.
+        for label, _, condition in self.ORDER:
+            with self.subTest(label):
+                self.assertEqual(self.step(label).get("if"), condition)
+        for step in self.steps[:2]:
+            self.assertNotIn("if", step)
+
+    def test_signing_is_worked_out_once_from_the_flag_and_the_repository_variables(self):
+        signing = self.step("signing")
+        self.assertEqual(signing["id"], "signing")
+        self.assertEqual(signing["run"], 'python packaging/build.py signing --event "$env:GITHUB_EVENT_NAME" '
+                                         ">> $env:GITHUB_OUTPUT")
+        self.assertEqual(signing["env"], {name: "${{ vars.%s }}" % name for name in build.SIGNPATH_VARIABLES})
+        # Only signing_plan picks a policy and reads the uninstaller's switch, so nothing else names them.
+        for name in build.SIGNPATH_VARIABLES[2:]:
+            with self.subTest(name):
+                self.assertEqual(self.text.count(name), 2)
+                self.assertIn(f"{name}: ${{{{ vars.{name} }}}}", signing["text"])
+
+    def test_the_job_has_the_permissions_and_the_time_signing_needs(self):
+        permissions = self.text.split("\npermissions:\n", 1)[1].split("\n\n", 1)[0]
+        granted = dict(re.findall(r"^  ([\w-]+): (\w+)", permissions, re.M))
+        self.assertEqual(granted, {"contents": "write", "id-token": "write", "attestations": "write",
+                                   "actions": "read"})
+        timeouts = re.findall(r"^    timeout-minutes: (.*)$", self.text, re.M)
+        self.assertEqual(timeouts, ["${{ vars.SIGNPATH_PROJECT_SLUG != '' && 240 || 45 }}"])
+        signing, unsigned = map(int, re.findall(r"\d+", timeouts[0]))
+        waits = [int(step["with"]["wait-for-completion-timeout-in-seconds"]) for step in self.steps
+                 if step.get("uses") == self.ACTION]
+        self.assertEqual(waits, [3600, 3600])
+        # Both requests waiting their longest still leave the unsigned build's time, inside the 6 hours GitHub
+        # allows a job on its own runners.
+        self.assertLessEqual(unsigned + sum(waits) // 60, signing)
+        self.assertLessEqual(signing, 360)
+
+    def test_it_runs_on_githubs_own_runner_with_nothing_kept_from_earlier_builds(self):
+        self.assertEqual(re.findall(r"^    runs-on: (.*)$", self.text, re.M), ["windows-latest"])
+        jobs = self.text.split("\njobs:\n", 1)[1]
+        self.assertEqual(re.findall(r"^  ([\w-]+):$", jobs, re.M), ["installer"])
+        for word in ("self-hosted", "actions/cache", "cache:"):
+            self.assertNotIn(word, self.text)
+
+    def test_signpaths_action_is_pinned_by_commit_and_given_what_it_needs(self):
+        commit = self.ACTION.split("@")[1]
+        self.assertRegex(commit, r"\A[0-9a-f]{40}\Z")
+        self.assertEqual(re.findall(r"uses: (signpath/\S+)", self.text), [self.ACTION] * 2)
+        iss = Script()
+        names = []
+        for slug, upload, directory, name in (
+                ("uninstaller", "uninstaller upload", "build/signed-uninstaller", build.UNINSTALLER_NAME),
+                ("installer", "unsigned upload", "build/signed", iss.setup["OutputBaseFilename"] + ".exe")):
+            with self.subTest(slug):
+                uploaded, submitted = self.step(upload), self.step(slug + " signing")
+                self.assertEqual(submitted["uses"], self.ACTION)
+                self.assertEqual(submitted["with"], {
+                    "api-token": "${{ secrets.SIGNPATH_API_TOKEN }}",
+                    "organization-id": "${{ vars.SIGNPATH_ORGANIZATION_ID }}",
+                    "project-slug": "${{ vars.SIGNPATH_PROJECT_SLUG }}",
+                    "signing-policy-slug": "${{ steps.signing.outputs.policy }}",
+                    "artifact-configuration-slug": slug,
+                    "github-artifact-id": "${{ steps.%s.outputs.artifact-id }}" % uploaded["id"],
+                    "wait-for-completion": "true",
+                    "wait-for-completion-timeout-in-seconds": "3600",
+                    "output-artifact-directory": directory,
+                    "parameters": "version: ${{ toJSON(steps.versions.outputs.app) }}",
+                })
+                # Uploaded zipped, as the configuration's zip-file root expects, holding the one file its
+                # pe-file names, under that name.
+                self.assertTrue(uploaded["uses"].startswith("actions/upload-artifact@"))
+                self.assertNotIn("archive", uploaded["with"])
+                self.assertEqual(Path(uploaded["with"]["path"]).name, name)
+                # Kept for a day, upload-artifact's shortest, since nobody should download an unsigned copy
+                # from a signing run later.
+                self.assertEqual(uploaded["with"]["retention-days"], "1")
+                xml = ROOT / ".signpath" / "artifact-configurations" / (slug + ".xml")
+                where = f"{SIGNPATH_NS}zip-file/{SIGNPATH_NS}pe-file"
+                self.assertEqual(ElementTree.parse(xml).getroot().find(where).get("path"), name)
+                names.append(uploaded["with"]["name"])
+        names.append(self.step("upload")["with"]["name"])
+        self.assertEqual(len(set(names)), 3, names)
+        # The installer people download keeps the repository's own retention.
+        self.assertNotIn("retention-days", self.step("upload")["with"])
+
+    def test_the_api_token_goes_only_to_signpaths_action(self):
+        self.assertNotIn("secrets.", self.text.split("\n    steps:\n", 1)[0])
+        places = []
+        for step in self.steps:
+            for key, value in step.items():
+                pairs = value.items() if isinstance(value, dict) else [(None, value)]
+                places += [(key, name) for name, inner in pairs if key != "text" and "secrets." in inner]
+        self.assertEqual(places, [("with", "api-token")] * 2)
+
+    def test_the_uninstaller_pass_accepts_only_the_stop_that_asks_for_a_signature(self):
+        first = self.step("first compile")["run"]
+        self.assertEqual(re.findall(r"/D(\w+)", first), ["AppVersion", "PyVersion", "SignUninstaller"])
+        asked = "please attach your digital signature to the following executable file"
+        self.assertIn(f'$asked = "{asked}"', first)
+        self.assertIn('if ($code -ne 2 -or -not ($output -join "`n").Contains($asked)) {', first)
+        self.assertTrue(first.endswith("\nexit 0"))
+        # The script leaves the file where uninstaller-out and uninstaller-in look, and each file goes where
+        # the next step expects it.
+        folder = Script().conditional["SignUninstaller"]["SignedUninstallerDir"]
+        self.assertEqual((PACKAGING / folder.replace("\\", "/")).resolve(), build.UNINSTALLER)
+        self.assertEqual(self.step("uninstaller-out")["run"], "python packaging/build.py uninstaller-out")
+        uploaded = self.step("uninstaller upload")["with"]["path"]
+        self.assertEqual(ROOT / uploaded, build.UNINSTALLER_OUT / build.UNINSTALLER_NAME)
+        directory = self.step("uninstaller signing")["with"]["output-artifact-directory"]
+        signed = directory + "/" + build.UNINSTALLER_NAME
+        self.assertEqual(self.step("uninstaller check")["env"]["SIGNED"], signed.replace("/", "\\"))
+        self.assertEqual(self.step("uninstaller-in")["run"],
+                         "python packaging/build.py uninstaller-in --signed " + signed)
+
+    def test_the_compiler_gets_the_defines_the_script_expects(self):
+        iss = Script()
+        self.assertEqual(set(iss.defines), {"AppVersion", "PyVersion"})
+        self.assertEqual(list(iss.conditional), ["SignUninstaller"])
+        compile_step = self.step("compile")
+        lines = [line.strip() for line in compile_step["run"].splitlines()]
+        self.assertEqual([line for line in lines if "/D" in line],
+                         ['$defines = "/DAppVersion=$env:APP_VERSION", "/DPyVersion=$env:PY_VERSION"',
+                          """if ($env:SIGN_UNINSTALLER -eq 'true') { $defines += "/DSignUninstaller" }"""])
+        self.assertEqual(compile_step["env"]["SIGN_UNINSTALLER"], "${{ steps.signing.outputs.uninstaller }}")
+        for label in ("first compile", "compile"):
+            with self.subTest(label):
+                step = self.step(label)
+                self.assertEqual({key: step["env"][key] for key in ("ISCC", "APP_VERSION", "PY_VERSION")},
+                                 {"ISCC": "${{ steps.inno.outputs.iscc }}",
+                                  "APP_VERSION": "${{ steps.versions.outputs.app }}",
+                                  "PY_VERSION": "${{ steps.versions.outputs.python }}"})
+                self.assertIn("packaging\\tapewright.iss", step["run"])
+        self.assertIn('"iscc=$($iscc.FullName)" >> $env:GITHUB_OUTPUT', self.step("inno")["run"])
+        # Inno Setup's programs carry no version resource (ISCC.exe 6.7.3 reads 0.0.0.0), so a check on
+        # VersionInfo refuses every Inno Setup; tapewright.iss checks the version itself.
+        self.assertNotIn("VersionInfo", self.step("inno")["run"])
+
+    def test_the_signature_is_checked_before_anything_describes_the_installer(self):
+        uninstaller, installer = self.step("uninstaller check"), self.step("installer check")
+        # One set of rules for both, after which the installer's step puts the file it checked in dist.
+        self.assertTrue(installer["run"].startswith(uninstaller["run"]))
+        self.assertEqual(installer["run"][len(uninstaller["run"]):].strip(),
+                         "Copy-Item -LiteralPath $env:SIGNED -Destination dist\\TapewrightSetup.exe -Force")
+        rules = uninstaller["run"]
+        release = "if ($env:MODE -eq 'release') {"
+        test = "} elseif (-not $signature.TimeStamperCertificate) {"
+        self.assertEqual((rules.count(release), rules.count(test)), (1, 1))
+        always, on_release = rules[:rules.index(release)], rules[rules.index(release):rules.index(test)]
+        on_test = rules[rules.index(test):]
+        # Every run needs a signature, on a file that hasn't changed since it was signed.
+        for part in ("$signature = Get-AuthenticodeSignature -LiteralPath $env:SIGNED",
+                     "if (-not $signature.SignerCertificate) { throw",
+                     "if ($signature.Status -eq 'HashMismatch') { throw"):
+            self.assertIn(part, always)
+        # A timestamp, Valid and SignPath Foundation are required of a release only: a test certificate isn't
+        # trusted, and SignPath's documentation doesn't say whether a test signature is timestamped.
+        for part in ("if (-not $signature.TimeStamperCertificate) { throw",
+                     "if ($signature.Status -ne 'Valid') { throw",
+                     "if (-not $subject.StartsWith('CN=SignPath Foundation', 'Ordinal')) {"):
+            self.assertIn(part, on_release)
+        self.assertEqual((always.count("throw"), on_release.count("throw")), (2, 3))
+        # On a test run, a missing timestamp prints a warning annotation, which fails nothing, and that ends
+        # the rules.
+        lines = [line.strip() for line in on_test.splitlines()]
+        self.assertEqual((lines[0], lines[-1]), (test, "}"))
+        self.assertRegex(lines[-2], r'\A"::warning title=[^:,]+::\$warning"\Z')
+        self.assertIn("test signature has no timestamp", lines[-3])
+        for word in ("throw", "exit", "Write-Error", "$LASTEXITCODE"):
+            self.assertNotIn(word, on_test)
+        for step in (uninstaller, installer):
+            self.assertEqual(step["env"]["MODE"], "${{ steps.signing.outputs.mode }}")
+        directory = self.step("installer signing")["with"]["output-artifact-directory"]
+        self.assertEqual(installer["env"]["SIGNED"], directory.replace("/", "\\") + "\\TapewrightSetup.exe")
+        self.assertEqual(self.step("unsigned upload")["with"]["path"], "dist/TapewrightSetup.exe")
+        # Then the sums, the artifact, the attestation and the release, all naming that dist file, and nothing
+        # after them.
+        self.assertEqual(self.step("sums")["run"], "python packaging/build.py sums dist/TapewrightSetup.exe")
+        self.assertEqual(self.step("upload")["with"]["path"], "dist/")
+        self.assertEqual(self.step("attest")["with"]["subject-path"], "dist/TapewrightSetup.exe")
+        self.assertIn("dist/TapewrightSetup.exe dist/SHA256SUMS.txt", self.step("release")["run"])
+        last = ("installer check", "sums", "upload", "attest", "release")
+        self.assertEqual([self.find(label) for label in last], list(range(len(self.steps)))[-5:])
+
+    def test_the_runtime_report_changes_nothing_and_fails_nothing(self):
+        report = self.step("report")
+        self.assertEqual(report["continue-on-error"], "true")
+        self.assertIn("-Include *.exe, *.dll, *.pyd", report["run"])
+        self.assertIn("(Get-AuthenticodeSignature -LiteralPath $file.FullName).Status", report["run"])
+        for word in ("Remove-Item", "Copy-Item", "Move-Item", "New-Item", "Set-", "Out-File", ">", "throw",
+                     "exit"):
+            with self.subTest(word):
+                self.assertNotIn(word, report["run"])
 
     def test_the_unit_tests_keep_their_settings_and_tools_in_the_runners_temp_folder(self):
-        tests = self.steps[self.step(r"-m unittest")]
-        self.assertIn("TAPEWRIGHT_CONFIG_DIR: ${{ runner.temp }}", tests)
-        self.assertIn("TAPEWRIGHT_TOOLS_DIR: ${{ runner.temp }}", tests)
+        tests = self.step("unit tests")["env"]
+        self.assertEqual(tests["TAPEWRIGHT_CONFIG_DIR"], "${{ runner.temp }}\\tapewright-config")
+        self.assertEqual(tests["TAPEWRIGHT_TOOLS_DIR"], "${{ runner.temp }}\\tapewright-tools")
 
     def test_only_a_pushed_tag_is_checked_attested_and_released(self):
         self.assertIn('  push:\n    tags: ["v*"]', self.text)
         self.assertNotIn("branches:", self.text)
-        for pattern in (r"build\.py check-tag", r"uses: actions/attest@", r"gh release create"):
-            with self.subTest(pattern):
-                self.assertIn("if: github.event_name == 'push'", self.steps[self.step(pattern)])
-        for pattern in (r"build\.py runtime$", r"ISCC", r"uses: actions/upload-artifact@"):
-            with self.subTest(pattern):
-                self.assertNotIn("if:", self.steps[self.step(pattern)])
-        release = self.steps[self.step(r"gh release create")]
+        release = self.step("release")["run"]
         for part in ("dist/TapewrightSetup.exe dist/SHA256SUMS.txt", "--draft",
                      "--notes-file packaging/release-notes.md"):
             self.assertIn(part, release)
 
-    def test_the_compiler_gets_the_defines_the_script_expects(self):
-        compile_step = self.steps[self.step(r"ISCC")]
-        self.assertEqual(re.findall(r"/D(\w+)=", compile_step), ["AppVersion", "PyVersion"])
-        self.assertEqual(set(Script().defines), {"AppVersion", "PyVersion"})
-        self.assertIn("packaging\\tapewright.iss", compile_step)
+
+class Signing(unittest.TestCase):
+    """What README, the release notes and Help say about signing, held to packaging/signing.json, and the
+    copies of the artifact configurations entered in SignPath's project."""
+
+    LINKED = ("Free code signing provided by [SignPath.io](https://about.signpath.io), certificate by "
+              "[SignPath Foundation](https://signpath.org)")
+
+    @classmethod
+    def setUpClass(cls):
+        cls.signed = build.load_signing()
+        cls.readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        cls.notes = (PACKAGING / "release-notes.md").read_text(encoding="utf-8")
+        cls.help_source = (ROOT / "tapewright" / "help_content.py").read_text(encoding="utf-8")
+        warned = [topic for topic in help_content.TOPICS if topic["title"] == "Windows warned me about it"]
+        assert len(warned) == 1, "Help has no one topic called Windows warned me about it"
+        cls.warned = _help_words(warned)
+
+    def test_nothing_says_signed_before_signing_json_does(self):
+        readme, notes, help_words = _prose(self.readme), _prose(self.notes), _help_words(help_content.TOPICS)
+        install = _prose(_section(self.readme, "Install on Windows"))
+        policy = _prose(_section(self.readme, "Code signing policy"))
+        if not self.signed:
+            self.assertIn("The installer isn't signed yet", install)
+            self.assertIn("isn't signed yet", policy)
+            self.assertIn("installer isn't signed yet", self.warned)
+            self.assertIn("installer isn't signed yet", notes)
+            # SignPath's attribution line, however it is marked up or capitalized, so the raw text: _prose
+            # unwraps only inline links. help_content.py's source counts too, comments and all. AGENTS.md
+            # quotes the line on purpose, so it isn't read here.
+            raw = {"README.md": self.readme, "packaging/release-notes.md": self.notes,
+                   "tapewright/help_content.py": self.help_source, "Help": help_words}
+            for name, text in raw.items():
+                for words in ("signpath.io", "free code signing"):
+                    with self.subTest(name, words=words):
+                        self.assertNotIn(words, text.casefold())
+            # The release notes and Help have no reason to name SignPath at all until the installer is signed.
+            for name in ("packaging/release-notes.md", "tapewright/help_content.py", "Help"):
+                with self.subTest(name, words="signpath"):
+                    self.assertNotIn("signpath", raw[name].casefold())
+            # README has to name SignPath Foundation, where Tapewright means to apply, so it is held to making
+            # no claim: no "signed by", and no "is signed" but in a clause that asks whether, or says until or
+            # if, as README's own "whether the installer is signed" and "until a release says its installer
+            # is signed, it isn't" do. A comma after the words doesn't make a claim a question, so the whole
+            # clause is read.
+            with self.subTest("README.md", words="signed by"):
+                self.assertNotIn("signed by", readme.casefold())
+            claims = []
+            for clause in re.split(r"[.;:]", readme.casefold()):
+                said = re.search(r"\bis signed\b", clause)
+                if said and not re.search(r"\b(whether|until|if)\b", clause[:said.start()]):
+                    claims.append(clause.strip())
+            self.assertEqual(claims, [], "README says the installer is signed")
+        else:
+            self.assertIn(self.LINKED, " ".join(self.readme.split()))
+            self.assertNotIn("intends to apply", policy)
+            for name, text in (("README.md", readme), ("packaging/release-notes.md", notes),
+                               ("Help's Windows warned me about it", self.warned)):
+                with self.subTest(name, words="SignPath Foundation"):
+                    self.assertIn("SignPath Foundation", text)
+            for name, text in (("README.md", readme), ("packaging/release-notes.md", notes),
+                               ("Help", help_words)):
+                with self.subTest(name, words="isn't signed"):
+                    self.assertNotIn("isn't signed", text.casefold())
+
+    def test_the_policy_is_linked_whichever_way_signing_json_says(self):
+        self.assertIn("\n## Privacy\n", self.readme)
+        self.assertIn("\n## Code signing policy\n", self.readme)
+        self.assertIn("](#privacy)", _section(self.readme, "Code signing policy"))
+        self.assertIn("](#code-signing-policy)", _section(self.readme, "Install on Windows"))
+        self.assertIn("https://github.com/angrysandhill/tapewright#code-signing-policy", self.notes)
+
+    def test_signpath_is_asked_to_sign_only_tapewright_at_the_version_built(self):
+        folder = ROOT / ".signpath" / "artifact-configurations"
+        self.assertEqual(sorted(path.name for path in folder.iterdir()), ["installer.xml", "uninstaller.xml"])
+        iss = Script()
+        self.assertEqual(iss.setup["VersionInfoProductName"], APP_NAME)
+        self.assertEqual(iss.setup["VersionInfoProductVersion"], "{#AppVersion}")
+        files = {"installer": iss.setup["OutputBaseFilename"] + ".exe", "uninstaller": build.UNINSTALLER_NAME}
+        ns = SIGNPATH_NS
+        for slug, name in files.items():
+            with self.subTest(slug):
+                text = (folder / (slug + ".xml")).read_text(encoding="utf-8")
+                # The SPDX lines, and that this is only a copy of what SignPath's project holds, in a comment.
+                self.assertTrue(text.startswith("<!--\nSPDX-FileCopyrightText: 2026 AngrySandhill\n"
+                                                "SPDX-License-Identifier: GPL-3.0-or-later\n"))
+                self.assertIn("SignPath doesn't read this file. It is a copy", text)
+                self.assertIn(f'under the slug "{slug}"', " ".join(text.split()))
+                root = ElementTree.fromstring(text)
+                self.assertEqual(root.tag, ns + "artifact-configuration")
+                self.assertEqual([child.tag for child in root], [ns + "parameters", ns + "zip-file"])
+                self.assertEqual([(parameter.tag, parameter.attrib) for parameter in root[0]],
+                                 [(ns + "parameter", {"name": "version", "required": "true"})])
+                self.assertEqual([child.tag for child in root[1]], [ns + "pe-file"])
+                pe_file = root[1][0]
+                self.assertEqual(pe_file.attrib,
+                                 {"path": name, "product-name": APP_NAME, "product-version": "${version}"})
+                self.assertEqual([(child.tag, child.attrib, list(child)) for child in pe_file],
+                                 [(ns + "authenticode-sign", {}, [])])
 
 
 def _drawing(size):

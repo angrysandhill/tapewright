@@ -4,11 +4,17 @@
 
     python packaging/build.py check-tag v0.2.0   the tag names this version of Tapewright (tag pushes only)
     python packaging/build.py versions           app=... and python=..., for Inno Setup's /D options
+    python packaging/build.py signing --event E  mode=, policy= and uninstaller=, for the SignPath steps
     python packaging/build.py runtime            python.org's runtime zip, checked twice, then unpacked
     python packaging/build.py check              that runtime's Python and Tk match the pin, and pip runs
     python packaging/build.py mark               the marker procs.bundled() looks for, after the tests
     python packaging/build.py stage              the files the installer puts in its app folder
+    python packaging/build.py uninstaller-out    Inno Setup's unsigned uninstaller, copied out for SignPath
+    python packaging/build.py uninstaller-in     SignPath's signed copy of it, put back (--signed FILE)
     python packaging/build.py sums FILE...       dist/SHA256SUMS.txt
+
+uninstaller-out and uninstaller-in run only when the uninstaller is signed too: after a first compile that
+stops for its signature, and before the compile that embeds it.
 
 It runs on whatever Python the build machine has, so it uses the standard library only, and it never imports
 tapewright: the version is read out of tapewright/__init__.py with ast. Importing this file does nothing;
@@ -31,8 +37,29 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 PIN = ROOT / "packaging" / "runtime.json"
+SIGNING = ROOT / "packaging" / "signing.json"
 BUILD = ROOT / "build"
 DIST = ROOT / "dist"
+# SignedUninstallerDir in tapewright.iss, which a test keeps the same. With SignedUninstaller=yes and no
+# SignTool, ISCC 6.7.1 writes the uninstaller it would embed there as uninst-<Inno Setup version>-<the
+# first 10 hex digits of its SHA-256>.e32 and prints "Creating new signed uninstaller file: <path>". While
+# that file carries no signature it stops the compile with "Signed uninstaller mode is enabled. Using an
+# external code-signing tool, please attach your digital signature to the following executable file: <path>
+# and compile again", then "Compile aborted.", and exits with 2. The next compile finds that file, accepts
+# it only if it is the same bytes with a certificate table added at the end, and embeds it. Read in issrc at
+# tag is-6_7_1: Compiler.SetupCompiler.pas 7780-7786 and 7811-7813 (the name, the message, the stop) and
+# 7682-7745 (the check), Compiler.Messages.pas 39 and 140-143, Compiler.Compile.pas 172-174, and ISCC.dpr
+# 648-650.
+UNINSTALLER = BUILD / "uninstaller"
+UNSIGNED_UNINSTALLER = "uninst-*.e32"
+UNINSTALLER_OUT = BUILD / "sign" / "uninstaller"
+# SignPath picks the file to sign by its name in the uploaded zip, and its pe-file reference lists .exe but
+# not .e32, so the copy goes up as an .exe. Whether SignPath signs it, and ISCC then accepts what comes back,
+# is a guess until the first test-signing run.
+UNINSTALLER_NAME = "uninstaller.exe"
+# The repository variables release.yml hands the signing step, in its order.
+SIGNPATH_VARIABLES = ("SIGNPATH_ORGANIZATION_ID", "SIGNPATH_PROJECT_SLUG", "SIGNPATH_TEST_POLICY_SLUG",
+                      "SIGNPATH_RELEASE_POLICY_SLUG", "SIGNPATH_SIGN_UNINSTALLER")
 INDEX_URL = "https://www.python.org/ftp/python/index-windows.json"
 # pymanager splits that index into pages, each naming the next under "next" (its scripts/repartition-index.py
 # writes them). These caps only stop a broken index from looping or filling memory.
@@ -75,6 +102,62 @@ def load_pin(path=PIN):
         if not isinstance(pin[key], str) or not re.fullmatch(shape, pin[key]):
             raise BuildError(f"{path}: {key} is {pin[key]!r}, which isn't in the shape it should be")
     return pin
+
+
+def load_signing(path=SIGNING):
+    """Whether signing.json says the installer is signed, refused unless it holds exactly that one boolean."""
+    try:
+        flag = json.loads(Path(path).read_text(encoding="utf-8"))
+    except ValueError as error:
+        raise BuildError(f"{path} isn't JSON: {error}") from None
+    if not isinstance(flag, dict) or set(flag) != {"installer_signed"} or not isinstance(
+            flag["installer_signed"], bool):
+        raise BuildError(f'{path} must hold exactly {{"installer_signed": false}} or '
+                         '{"installer_signed": true}')
+    return flag["installer_signed"]
+
+
+def signing_plan(event, signed, env):
+    """What release.yml's SignPath steps do on this run, as the text of its outputs: "mode" is "none", "test"
+    or "release", "policy" the signing policy's slug or "", and "uninstaller" "true" or "false".
+
+    event is GITHUB_EVENT_NAME, signed is load_signing()'s answer, and env holds SIGNPATH_VARIABLES, where a
+    variable that isn't set is missing or empty. A tag push signs with the release policy only once
+    signing.json says the installer is signed, and then SignPath must be configured; until then it builds
+    unsigned whatever is set. A manual run test-signs when SignPath is configured and builds unsigned when
+    none of it is, and never uses the release policy, since it releases nothing. A half configuration is a
+    mistake, never a quiet unsigned build. The uninstaller is signed too only on a run that signs, with
+    SIGNPATH_SIGN_UNINSTALLER exactly "true".
+    """
+    values = {name: env.get(name) or "" for name in SIGNPATH_VARIABLES}
+    organization, project, test, release, uninstaller = SIGNPATH_VARIABLES
+    none = {"mode": "none", "policy": "", "uninstaller": "false"}
+    if event == "push":
+        if not signed:
+            return none
+        missing = [name for name in (organization, project, release) if not values[name]]
+        if missing:
+            raise BuildError("packaging/signing.json says the installer is signed, but SignPath isn't "
+                             f"configured for a release: set {', '.join(missing)}")
+        mode, policy = "release", values[release]
+    elif event == "workflow_dispatch":
+        needed = (organization, project, test)
+        missing = [name for name in needed if not values[name]]
+        if len(missing) == len(needed):
+            return none
+        if missing:
+            raise BuildError(f"SignPath is only partly configured for a manual run: set {', '.join(missing)} "
+                             "too, or unset every one of " + ", ".join(needed))
+        mode, policy = "test", values[test]
+    else:
+        raise BuildError(f"release.yml runs on push and workflow_dispatch, not {event!r}")
+    # $GITHUB_OUTPUT reads one name=value a line, so a line break would add an output of its own.
+    if "\n" in policy or "\r" in policy:
+        raise BuildError(f"the signing policy's slug {policy!r} holds a line break")
+    if values[uninstaller] not in ("", "false", "true"):
+        raise BuildError(f"{uninstaller} is {values[uninstaller]!r}; it must be true, false or not set")
+    signs_uninstaller = "true" if values[uninstaller] == "true" else "false"
+    return {"mode": mode, "policy": policy, "uninstaller": signs_uninstaller}
 
 
 def index_has(index_json, url, sha256):
@@ -247,6 +330,22 @@ def _fresh(folder):
     folder.mkdir(parents=True, exist_ok=True)
 
 
+def unsigned_uninstaller(folder):
+    """The one uninst-*.e32 the first compile left in folder, or BuildError for none or more than one.
+
+    ISCC writes it as <name>.tmp and renames it, so a .tmp left by a failed write never counts.
+    """
+    folder = Path(folder)
+    found = []
+    if folder.is_dir():
+        found = sorted(path for path in folder.glob(UNSIGNED_UNINSTALLER) if path.is_file())
+    if len(found) != 1:
+        names = ", ".join(path.name for path in found) or "none"
+        raise BuildError(f"{folder} must hold exactly one {UNSIGNED_UNINSTALLER}, the uninstaller a compile "
+                         f"with /DSignUninstaller leaves to be signed, and it holds {names}")
+    return found[0]
+
+
 def _ask(exe, *args):
     """What the runtime's Python printed, or None when it failed.
 
@@ -278,6 +377,27 @@ def cmd_check_tag(args):
 def cmd_versions(args):
     print("app=" + read_version(ROOT / "tapewright" / "__init__.py"))
     print("python=" + load_pin()["version"])
+    return 0
+
+
+def cmd_signing(args):
+    signed = load_signing(SIGNING)
+    plan = signing_plan(args.event, signed, os.environ)
+    for key in ("mode", "policy", "uninstaller"):
+        print(f"{key}={plan[key]}")  # only these lines, which release.yml appends to $GITHUB_OUTPUT
+    policy = plan["policy"]
+    if plan["mode"] == "release":
+        why = f"a tag push, and signing.json says signed: SignPath signs with the release policy {policy}"
+    elif plan["mode"] == "test":
+        why = (f"a manual run with SignPath configured: SignPath signs with the test policy {policy}, "
+               "and a manual run releases nothing")
+    elif args.event == "push":
+        why = "signing.json says the installer isn't signed, so this release is built unsigned"
+    else:
+        why = "SignPath isn't configured, so this manual run builds the installer unsigned"
+    if plan["uninstaller"] == "true":
+        why += ". The uninstaller is signed too"
+    print("ok   " + why, file=sys.stderr)
     return 0
 
 
@@ -335,6 +455,41 @@ def cmd_stage(args):
     return 0
 
 
+def cmd_uninstaller_out(args):
+    unsigned = unsigned_uninstaller(args.dir)
+    _fresh(args.out)
+    shutil.copyfile(unsigned, args.out / UNINSTALLER_NAME)
+    print(f"ok   {unsigned.name} copied to {args.out / UNINSTALLER_NAME} for SignPath")
+    return 0
+
+
+def cmd_uninstaller_in(args):
+    """Puts the signed copy in place of the unsigned file, under the .e32 name the next compile looks for.
+
+    That compile checks it byte for byte, so this refuses only what plainly isn't a signed copy: no file, a
+    file that isn't a program, or one that isn't larger than the unsigned file, as a signature makes it.
+    """
+    unsigned = unsigned_uninstaller(args.dir)
+    if not args.signed.is_file():
+        raise BuildError(f"there is no signed uninstaller at {args.signed}")
+    with open(args.signed, "rb") as file:
+        if file.read(2) != b"MZ":
+            raise BuildError(f"{args.signed} doesn't start with MZ, so it isn't a program")
+    before, after = unsigned.stat().st_size, args.signed.stat().st_size
+    if after <= before:
+        raise BuildError(f"{args.signed} is {after:,} bytes, no more than the {before:,} of {unsigned.name}, "
+                         "so it carries no signature")
+    part = unsigned.with_name(unsigned.name + ".part")
+    try:
+        shutil.copyfile(args.signed, part)
+        os.replace(part, unsigned)
+    finally:
+        if part.exists():
+            part.unlink()
+    print(f"ok   {unsigned.name} is now the signed copy: {after:,} bytes, {before:,} before")
+    return 0
+
+
 def cmd_sums(args):
     text = sums_text(args.files)
     DIST.mkdir(parents=True, exist_ok=True)
@@ -346,10 +501,13 @@ def cmd_sums(args):
 COMMANDS = {
     "check-tag": cmd_check_tag,
     "versions": cmd_versions,
+    "signing": cmd_signing,
     "runtime": cmd_runtime,
     "check": cmd_check,
     "mark": cmd_mark,
     "stage": cmd_stage,
+    "uninstaller-out": cmd_uninstaller_out,
+    "uninstaller-in": cmd_uninstaller_in,
     "sums": cmd_sums,
 }
 
@@ -360,6 +518,8 @@ def main(argv=None):
     steps = parser.add_subparsers(dest="command", required=True)
     steps.add_parser("check-tag", help="fail unless TAG is v and Tapewright's version").add_argument("tag")
     steps.add_parser("versions", help="print app=VERSION and python=VERSION")
+    signing = steps.add_parser("signing", help="print mode=, policy= and uninstaller= for release.yml")
+    signing.add_argument("--event", required=True, help="GITHUB_EVENT_NAME: push or workflow_dispatch")
     steps.add_parser("runtime", help="download, verify and unpack python.org's runtime").add_argument(
         "--out", type=Path, default=BUILD / "runtime")
     steps.add_parser("check", help="check the unpacked runtime").add_argument(
@@ -368,6 +528,12 @@ def main(argv=None):
         "--runtime", type=Path, default=BUILD / "runtime")
     steps.add_parser("stage", help="copy the app's files into a fresh folder").add_argument(
         "--out", type=Path, default=BUILD / "app")
+    out = steps.add_parser("uninstaller-out", help="copy the unsigned uninstaller out to be signed")
+    out.add_argument("--dir", type=Path, default=UNINSTALLER)
+    out.add_argument("--out", type=Path, default=UNINSTALLER_OUT)
+    back = steps.add_parser("uninstaller-in", help="put the signed uninstaller in place of the unsigned one")
+    back.add_argument("--signed", type=Path, required=True)
+    back.add_argument("--dir", type=Path, default=UNINSTALLER)
     steps.add_parser("sums", help="write dist/SHA256SUMS.txt").add_argument("files", type=Path, nargs="+")
     args = parser.parse_args(argv)
     try:

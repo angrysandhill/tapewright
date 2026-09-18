@@ -1,0 +1,20 @@
+<!--
+SPDX-FileCopyrightText: 2026 AngrySandhill
+SPDX-License-Identifier: GPL-3.0-or-later
+
+SignPath doesn't read this file. It is a copy, kept here for review, of the artifact configuration entered in
+the SignPath project under the slug "installer", which .github/workflows/release.yml names when it sends
+TapewrightSetup.exe; change the two together. upload-artifact zips what it uploads, so the root is a
+zip-file. SignPath Foundation requires the product name to be the project's and one product version per
+build, so only a TapewrightSetup.exe that says Tapewright and the version release.yml passes is signed.
+-->
+<artifact-configuration xmlns="http://signpath.io/artifact-configuration/v1">
+  <parameters>
+    <parameter name="version" required="true" />
+  </parameters>
+  <zip-file>
+    <pe-file path="TapewrightSetup.exe" product-name="Tapewright" product-version="${version}">
+      <authenticode-sign />
+    </pe-file>
+  </zip-file>
+</artifact-configuration>

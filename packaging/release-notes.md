@@ -5,7 +5,9 @@ Tapewright turns a link, or a file on your computer, into an MP3 or an MP4. This
 1. Under **Assets** below, click **TapewrightSetup.exe**. You can ignore the two files called **Source code**.
 2. When it has downloaded, open it. You don't need an administrator password: Tapewright is installed just for you, in your own user folder.
 
-If your browser says the file isn't commonly downloaded, choose **Keep**. Some browsers put Keep in a menu beside the download, behind three dots.
+If your browser says the file isn't commonly downloaded, choose **Keep**. Some browsers put Keep in a menu beside the download, behind three dots. In Microsoft Edge, click the three dots beside the download, then **Keep**, then **Show more**, then **Keep anyway**.
+
+If Tapewright has no settings saved for you on this computer yet, Setup shows a tick box, **Check for updates when Tapewright starts**, which you can untick to stop Tapewright checking for updates each time it starts. Whether Setup shows it or not, Tapewright's Settings tab can change this at any time.
 
 ### If Windows says "Windows protected your PC"
 
@@ -15,7 +17,9 @@ Windows says this about a new program from a small maker that it hasn't seen man
 2. Check that the name beside **App** is **TapewrightSetup.exe**, perhaps with a number such as (1) if you downloaded it more than once. If it is anything else, click **Don't run**.
 3. Click **Run anyway**.
 
-If the box only offers **OK**, this computer blocks programs that aren't signed, for example with Smart App Control. Wait for a signed version of Tapewright, or [run Tapewright from source](https://github.com/angrysandhill/tapewright#running-from-source).
+If the box only offers **OK**, this computer blocks programs that aren't signed, for example with Smart App Control. Click **OK**, and [run Tapewright from source](https://github.com/angrysandhill/tapewright#running-from-source) instead.
+
+Code signing policy: https://github.com/angrysandhill/tapewright#code-signing-policy
 
 ### If Setup says Tapewright is running
 

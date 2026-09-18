@@ -17,6 +17,11 @@
 #ifndef PyVersion
   #define PyVersion "3.14.6"
 #endif
+; WizardStyle's dark mode, below, arrived in Inno Setup 6.6.0. The script checks that itself, because Inno
+; Setup's own programs carry no version Windows can read (ISCC.exe 6.7.3 reports 0.0.0.0).
+#if Ver < EncodeVer(6, 6, 0)
+  #error Tapewright's installer needs Inno Setup 6.6 or later, for WizardStyle=modern dark.
+#endif
 
 [Setup]
 ; Windows knows the installed app by this ID. A later Setup with the same one finds the same folder and
@@ -25,6 +30,11 @@ AppId={{C7E317BA-41A6-4ADE-ABE5-173A5DAC0058}
 AppName=Tapewright
 AppVersion={#AppVersion}
 VersionInfoVersion={#AppVersion}
+; Inno Setup derives these two from AppName and VersionInfoVersion anyway. They are written out because a code
+; signing policy can require the product name to be the project's and one product version per build, and a
+; default can change under an unrelated edit: an AppName holding a constant would leave the name empty.
+VersionInfoProductName=Tapewright
+VersionInfoProductVersion={#AppVersion}
 AppPublisher=AngrySandhill
 AppPublisherURL=https://github.com/angrysandhill/tapewright
 ; Just for this user, so there is no administrator prompt, and so the private Python sits in a folder its
@@ -45,7 +55,7 @@ ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 ; Python 3.14 supports Windows 10 and later.
 MinVersion=10.0
-; Tapewright's own look is dark. The dark style arrived in Inno Setup 6.6.0.
+; Tapewright's own look is dark. The dark style arrived in Inno Setup 6.6.0, which the #if Ver check holds.
 WizardStyle=modern dark
 ; Setup and Uninstall both look for this mutex (app.APP_MUTEX) when they start, and ask for Tapewright to be
 ; closed. Nothing closes it for them: CloseApplications' Restart Manager would end it from outside, which
@@ -57,6 +67,17 @@ UninstallDisplayIcon={app}\app\tapewright.ico
 OutputDir=..\dist
 ; No version in the name, so /releases/latest/download/TapewrightSetup.exe always finds the newest.
 OutputBaseFilename=TapewrightSetup
+; With /DSignUninstaller, the uninstaller and Setup's temporary copies of itself carry a signature. With no
+; SignTool, the first such compile writes the unsigned uninstaller, uninst-*.e32, into ..\build\uninstaller
+; and stops, asking for it to be signed; release.yml has that file signed and put back, then compiles again,
+; which embeds the signature. Its name holds Inno Setup's version and a hash of its contents, and those
+; contents change with the version info, so every release needs a new signature. The folder is under build,
+; not dist, which release.yml uploads. A compile without /DSignUninstaller sets neither directive, and its
+; uninstaller is unsigned.
+#ifdef SignUninstaller
+SignedUninstaller=yes
+SignedUninstallerDir=..\build\uninstaller
+#endif
 ; The runtime is mostly Python source, which Inno Setup's help says one solid stream compresses far better.
 ; Its cost, unpacking every earlier file to reach a later one, is why the runtime and its marker come last in
 ; [Files]: an update that skips them never has to unpack them.
@@ -64,6 +85,10 @@ SolidCompression=yes
 
 [Tasks]
 Name: desktopicon; Description: "Put a Tapewright shortcut on the desktop"
+; Offered only while this Windows user has no Tapewright settings yet. That is usually a first install, but
+; running Tapewright from source leaves settings behind, and an install that was never opened leaves none.
+; The box with the same words on the Settings tab always works. CurStepChanged says what unticking it does.
+Name: startupcheck; Description: "Check for updates when Tapewright starts"; Check: NoSettingsYet
 
 [InstallDelete]
 ; The app folder is replaced whole every time, so a module a newer version dropped can't linger.
@@ -112,6 +137,8 @@ Type: dirifempty; Name: "{localappdata}\Tapewright"
 var
   RuntimeChecked: Boolean;
   RuntimeIsChanged: Boolean;
+  SettingsChecked: Boolean;
+  SettingsMissing: Boolean;
 
 // True when {app}\runtime isn't the Python this Setup carries: no python.exe, no marker, or a marker naming
 // another version. Setup may ask several times (on the Preparing page when Windows has renames pending, for
@@ -145,4 +172,63 @@ begin
       Result := 'Tapewright is still open.';
       Exit;
     end;
+end;
+
+// Tapewright's settings file, where config.config_dir() puts it on Windows: in TAPEWRIGHT_CONFIG_DIR when
+// that is set and not empty, otherwise in %APPDATA%\Tapewright. {userappdata} is the Application Data
+// folder of the user running Setup, the user this install is for.
+function SettingsFile(): String;
+begin
+  Result := GetEnv('TAPEWRIGHT_CONFIG_DIR');
+  if Result <> '' then
+    Result := AddBackslash(Result) + 'settings.json'
+  else
+    Result := ExpandConstant('{userappdata}\Tapewright\settings.json');
+end;
+
+// True when this Windows user has no Tapewright settings yet, which is when the startupcheck task is
+// offered. Setup evaluates a task's Check each time it builds the Select Additional Tasks page, which a
+// silent install builds too, and may call a check function several times. The first answer is kept, so the
+// task Setup offered, or left out, is the task CurStepChanged acts on.
+function NoSettingsYet(): Boolean;
+begin
+  if not SettingsChecked then begin
+    SettingsMissing := not FileExists(SettingsFile());
+    SettingsChecked := True;
+  end;
+  Result := SettingsMissing;
+end;
+
+// Unticking startupcheck turns off Tapewright's check at start by writing a settings file that holds only
+// {"check_on_startup": false}. One key is a whole settings file: config.Settings.load keeps the default for
+// every key a file lacks, so setup_done, missing, still opens the setup screen, and Tapewright's own saves
+// later write every key. Ticked, nothing is written at all. An existing settings file is never overwritten,
+// since it may hold choices made on the Settings tab. A file that appears while the wizard is open is most
+// likely one Tapewright wrote as it closed, having been opened in the meantime, with the check still on. So
+// Setup only reads a file it finds, and unless that file already turns the check off, in the spelling
+// Tapewright's own save writes (json.dump with indent=2), the message says where to untick it. It says so too
+// when the file can't be read or written. LoadStringFromFile takes the file's bytes as they are, which is
+// enough to find those plain ASCII words.
+// Uninstall keeps %APPDATA%\Tapewright, and a file written from [Code] isn't in Uninstall's log, so the
+// choice outlives an uninstall like any other setting. ssPostInstall comes once the files are in place and
+// before the Finish page's [Run] entry can start Tapewright. A silent install can untick the box with
+// /MERGETASKS="!startupcheck".
+procedure CurStepChanged(CurStep: TSetupStep);
+var
+  Settings: String;
+  Content: AnsiString;
+  Done: Boolean;
+begin
+  if (CurStep = ssPostInstall) and NoSettingsYet() and not WizardIsTaskSelected('startupcheck') then begin
+    Settings := SettingsFile();
+    if FileExists(Settings) then
+      Done := LoadStringFromFile(Settings, Content) and (Pos('"check_on_startup": false', Content) > 0)
+    else
+      Done := ForceDirectories(ExtractFileDir(Settings))
+        and SaveStringToFile(Settings, '{"check_on_startup": false}' + #10, False);
+    if not Done then
+      SuppressibleMsgBox('Setup couldn''t save your choice. To stop Tapewright checking for updates ' +
+        'when it starts, untick Check for updates when Tapewright starts on its Settings tab.',
+        mbError, MB_OK, IDOK);
+  end;
 end;

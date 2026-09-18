@@ -20,6 +20,8 @@ pixels) without a window, build the real window withdrawn in the `Window` class,
 builds the Windows installer (see "The installer" below): `build.py` reads Tapewright's version
 with `ast` rather than importing the package, and `make_icon.py` imports only `theme`, inside
 `main()`. `tests/test_packaging.py` covers both without a network, Inno Setup or a runtime.
+`.signpath/artifact-configurations/` holds copies, for review, of what SignPath's project is given (see
+"Code signing" below); nothing runs them.
 
 It uses the standard library only, deliberately. External tools are run as programs, never
 imported.
@@ -488,11 +490,12 @@ gaps).
 ### The installer
 
 `TapewrightSetup.exe` is built by `.github/workflows/release.yml` with Inno Setup, from
-`packaging/tapewright.iss`, python.org's Python runtime and Tapewright's source. The steps that
-build it, other than the unit tests and compiling, are subcommands of `packaging/build.py`, whose
-docstring lists them in order, so each can be run locally. Compiling needs Inno Setup, and the top
-of `tapewright.iss` gives its command line. The installer itself has never been built or run (see
-Known gaps).
+`packaging/tapewright.iss`, python.org's Python runtime and Tapewright's source. Its steps are
+subcommands of `packaging/build.py`, whose docstring lists them in order, so each can be run locally,
+except the unit tests, finding and running Inno Setup, the uploads and SignPath's action, and the steps
+that read signatures with `Get-AuthenticodeSignature`, which the standard library can't. Compiling needs
+Inno Setup, and the top of `tapewright.iss` gives its command line. The installer itself has never been
+built or run (see Known gaps).
 
 - **The runtime is python.org's own zip, unmodified, pinned in `packaging/runtime.json` and
   verified twice.** The pin names the version, the zip's address, its SHA-256 and the Tk version,
@@ -592,15 +595,235 @@ Known gaps).
   deflate stream is written by hand rather than with `zlib.compress`: measured, the same data at the
   same level compressed to different bytes on Windows' Python 3.14.5 (zlib-ng) and WSL's 3.14.4
   (zlib), and the test runs on both. `.gitattributes` marks `*.ico` binary.
+- **Setup offers the start-up check only while this user has no settings file, and writes one only when
+  that box is unticked** (`startupcheck` in `[Tasks]`, and `NoSettingsYet` and `CurStepChanged` in the
+  script's `[Code]`). The task's words are the Settings tab's "Check for updates when Tapewright starts",
+  and it is ticked, as `config.DEFAULTS` has the check. Unticked, Setup writes exactly
+  `{"check_on_startup": false}` and a newline at `ssPostInstall`, which comes before the Finish page can
+  start Tapewright, to `SettingsFile()`: where `config.config_dir()` keeps settings on Windows, in
+  `TAPEWRIGHT_CONFIG_DIR` when that is set and not empty, else in `%APPDATA%\Tapewright`. One key is a
+  whole settings file, because `config.Settings.load` keeps the default for every key a file lacks, so
+  `setup_done` stays False and the setup screen still opens, and Tapewright's own saves later write every
+  key. Setup never writes over a file. One that appeared while the wizard was open is most likely one
+  Tapewright wrote on closing, with the check still on, since `App.shutdown` saves settings every time.
+  So Setup reads it, and unless it already holds `"check_on_startup": false`, spelled exactly as
+  `config.Settings.save` writes it (`json.dump` with `indent=2`, whose separator is a colon and a space),
+  shows a message box that names the Settings tab's box; a file it can't read gets the message too. A
+  folder or file it can't write gets the same message, since otherwise the check would stay on with no
+  word. `/SUPPRESSMSGBOXES` hides it. `NoSettingsYet` keeps its first answer, like `RuntimeChanged`, so
+  the task Setup offered is the task it acts on. The file isn't in Uninstall's log and
+  `%APPDATA%\Tapewright` is kept, so the choice outlives an uninstall like any other setting. A silent
+  install unticks it with `/MERGETASKS="!startupcheck"`. The condition is "this Windows user has no
+  Tapewright settings yet", not "first install", and README, the release notes and `before-install.txt`
+  word it that way, with the Settings tab as the route that always works: someone who ran Tapewright
+  from source never sees the box, and an earlier install that was never opened shows it again. With Inno
+  Setup's UsePreviousTasks at its default, Setup starts the box from the choice saved by the install before
+  it, but that install saves only the tasks it showed, so after one that left the box out, the box starts
+  ticked (read in Inno Setup 6.7.1's Setup.WizardForm.pas, GetTasks, and Setup.Install.pas).
+  `{userappdata}` is the shell's folder for the user running Setup, while `config.config_dir()` reads
+  `APPDATA`; they differ only if that variable was changed by hand or Setup runs as another account.
+  Read in Inno Setup 6.7.1's help and source: a task whose Check is False isn't listed and counts as not
+  selected, a silent install builds the tasks page too, `ssPostInstall` comes before the postinstall
+  `[Run]` entries, `LoadStringFromFile` reads a file's bytes into an AnsiString and returns False when it
+  can't, and `Pos` is case-sensitive and returns 0 when the words aren't there. Never compiled. Tests
+  hold the Description against `settings_tab.py`, the JSON literal against `config.DEFAULTS` and
+  `config.Settings`, the words Setup looks for against what `config.Settings.save` writes (there with the
+  check off, absent with it on), the path against `config.config_dir()` and `APP_NAME`, and
+  `before-install.txt` to that label and to every host `deps.py` looks up.
+- **The version info names Tapewright and the version it installs, written out**
+  (`VersionInfoProductName`, `VersionInfoProductVersion`). SignPath Foundation's terms require every
+  signed file's product name to be the project's and its product version to be the same across a build,
+  enforced by the artifact configurations' restrictions (see "Code signing"). Inno Setup derives both
+  anyway, the name from `AppName` unless that holds a constant and the version from `VersionInfoVersion`
+  (read in its help), but a default can change under an unrelated edit. The textual product version
+  then defaults to `VersionInfoProductVersion`, so Setup says 0.2.0 as text and 0.2.0.0 as numbers;
+  which one SignPath compares is unknown (see Known gaps). Inno Setup writes the same version info into
+  the uninstaller it builds into Setup (read in its source). A test holds `AppName` to `APP_NAME`, and
+  `AppVersion`, `VersionInfoVersion` and `VersionInfoProductVersion` to `{#AppVersion}`.
+- **The uninstaller is signed only under `#ifdef SignUninstaller`, and a compile without
+  `/DSignUninstaller` sets no signing directive at all.** That compile's uninstaller, and the temporary
+  copy of Setup that runs the install, are unsigned, and it is the installer every run ships unless it
+  signs the uninstaller too. With the define, `SignedUninstaller=yes` and
+  `SignedUninstallerDir=..\build\uninstaller` apply. With no SignTool, the first such compile writes the
+  uninstaller as `uninst-*.e32` into that folder and stops, and the next compile embeds a signed copy
+  only if it is the same bytes with a certificate table added (`build.UNINSTALLER`'s comment gives the
+  lines in Inno Setup 6.7.1's source; "Code signing" has the workflow's side). The name holds Inno
+  Setup's version and a hash of the file, which the icon, WizardStyle and the version info change, so
+  every release needs a new signature (from the SignedUninstaller help). The folder is under `build`,
+  never `dist`, which is uploaded whole. With a signed uninstaller, Setup writes its messages to a
+  separate unins???.msg beside it, since embedding them would break the signature (same help page), so
+  the checklist's uninstall step looks for the whole folder gone. A test holds that only those two
+  directives sit in that block, that nothing defines the name, that no other directive starting `Sign`
+  is set, SignTool included, and that the folder resolves under `build.BUILD` and outside `build.DIST`.
 - **Only a pushed tag releases, and only as a draft.** `release.yml` runs on a pushed `v*` tag and
   on Run workflow. The tag check (`build.py check-tag`: `v` and `tapewright.__version__`, exactly),
   the attestation (`actions/attest`) and `gh release create --draft` run only for a push, so a
   manual run, even from a tag, leaves a workflow artifact and releases nothing. `build.py versions`
   prints `app=` and `python=` lines for ISCC's `/DAppVersion` and `/DPyVersion`. Inno Setup is the
-  runner image's own, refused below 6.6, where `WizardStyle=modern dark` arrived, and never
-  downloaded. A test fails when the workflow calls a `build.py` step that doesn't exist or leaves one
-  out, runs the steps out of order, or lets a releasing step run without a push. The draft is
-  published by hand, after the checklist under Testing.
+  runner image's own, found once by the step with `id: inno`, and never downloaded. `tapewright.iss`
+  itself refuses a compiler older than 6.6, where `WizardStyle=modern dark` arrived, with
+  `#if Ver < EncodeVer(6, 6, 0)` and `#error`, because Inno Setup's programs carry no version Windows
+  can read (measured on 6.7.3: ISCC.exe, ISCmplr.dll, ISPP.dll and Compil32.exe all report 0.0.0.0), so
+  the step can't ask. A test holds the check, and fails if the step reads `VersionInfo`. ISCC prints
+  "Compiler engine version" as it compiles. Every step after checkout and setup-python
+  is listed, in order and with its exact `if:`, in `ORDER` in `tests/test_packaging.py`'s `Workflow`,
+  so a test fails when a step is added, moved, dropped or put under another condition, and when the
+  workflow calls a `build.py` step that doesn't exist or leaves one out. The runtime, the compile and the
+  final upload have no `if:`. The draft is published by hand, after the checklist under Testing.
+
+### Code signing
+
+The installer isn't signed. What follows prepares for SignPath Foundation, which signs open source
+projects for free with a certificate issued to itself, so Windows would name SignPath Foundation as the
+publisher, never AngrySandhill. None of it has run: SignPath hasn't been applied to, there is no SignPath
+project, and every signing step is skipped until there is (see Known gaps). SignPath Foundation's rules
+here are from its terms, https://signpath.org/terms, a page marked draft, read on 2026-09-15; read them
+again before applying. Its GitHub integration is https://docs.signpath.io/trusted-build-systems/github.
+
+- **`packaging/signing.json` is the one switch, and nothing says the installer is signed before it
+  does.** It holds exactly `{"installer_signed": false}` or true and a newline, and `build.load_signing`
+  refuses any other shape, a BOM included. `.gitattributes` gives it `text eol=lf`, so every checkout git
+  writes has that newline byte for byte whatever core.autocrlf says, and Git for Windows sets that to
+  true by default (as on this PC); the tests read the file as text, so a copy made some other way passes
+  too. The `Signing` tests hold the words to it, by phrase, so a claim worded another way still gets past
+  them: read the words whenever they change. While it is false, README's "Install on Windows" and "Code
+  signing policy", the release notes and Help's "Windows warned me about it" say the installer isn't
+  signed yet; none of README, the release notes, `help_content.py` or Help's words contains "signpath.io"
+  or "free code signing" in any capitals, which catches SignPath's attribution line ("Free code signing
+  provided by SignPath.io, certificate by SignPath Foundation") however it is marked up; none of the
+  release notes, `help_content.py` and Help's words contains "signpath" at all; and README has no "signed
+  by" anywhere, and no "is signed" unless whether, until or if comes before it in the same clause, clauses
+  being split at full stops, semicolons and colons. A comma doesn't end a clause, so "is signed, and
+  Windows names SignPath Foundation" is refused, and so is a harmless "signed by the Python Software
+  Foundation", which is why README says "whatever signatures the Python Software Foundation gave them".
+  While it is true, README carries that line exactly, linked to https://about.signpath.io and
+  https://signpath.org, all three name SignPath Foundation, "isn't signed" is in none of README's prose,
+  the release notes or Help's words, and the Code signing policy doesn't say Tapewright "intends to
+  apply". Either way README has `## Code signing policy`, which links `#privacy`, its install section
+  links `#code-signing-policy`, and the release notes link the section, since the terms want "Code
+  signing policy" on the home page and on the release page. Each of these checks was made to fail on
+  scratch copies holding the wrong words, and the true branch has run only on such copies, with the flag
+  set true and the words changed to match. Flip the flag in the same commit as the words, and
+  only for a release SignPath Foundation's certificate signed: a test-signed installer is never released.
+- **`build.py signing` decides what a run signs, before the long steps** (`build.signing_plan`). It reads
+  the flag and the repository variables and prints only `mode=`, `policy=` and `uninstaller=` lines, for
+  `$GITHUB_OUTPUT`, with its reason on stderr. A tag push builds unsigned while the flag is false,
+  whatever is set, so SignPath's settings can't break an unsigned release. Once the flag is true, a tag
+  push signs with the release policy, and fails naming what is missing unless the organization, project
+  and release policy are all set, since a release that went out unsigned would contradict its own words.
+  A manual run test-signs when organization, project and test policy are all set, builds unsigned when
+  none is, and fails on some but not all, because a half configuration is a mistake; it never uses the
+  release policy, and it releases nothing. Any other event fails. The uninstaller is signed too only on
+  a run that signs, with `SIGNPATH_SIGN_UNINSTALLER` exactly `true`; on such a run any value but empty,
+  `false` or `true` fails, while a run that signs nothing ignores it, so a typo can't break an unsigned
+  release. A policy slug holding a line break fails, since it would add an output of its own. Tests
+  cover every row, and one walks every combination to show the release policy comes only from a tag push
+  with the flag true and the test policy only from a manual run.
+- **Only Tapewright's own build goes to SignPath: `TapewrightSetup.exe`, and optionally the uninstaller
+  Inno Setup builds into it.** The terms allow signing only artifacts built from the project's own
+  source, and allow unsigned binaries of upstream open source projects inside a signed package, so
+  python.org's files are never uploaded; they carry whatever signatures the Python Software Foundation
+  gave them. After `build.py check`, a report-only step lists every `.exe`, `.dll` and `.pyd` under
+  `build\runtime` whose signature isn't Valid, because the terms reserve the right to require signed
+  files only. In the pinned 3.14.6 zip, unpacked for the first local build (2026-09-17), everything
+  is Valid except seven programs, all NotSigned: pip's launchers under `pip\_vendor\distlib` (t32, t64,
+  t64-arm, w32, w64 and w64-arm.exe) and Tcl's `tcl\nmake\x86_64-w64-mingw32-nmakehlp.exe`. The report has
+  `continue-on-error`, and a test fails if it copies, moves, writes, throws or exits.
+- **The signed file is checked, then copied over `dist\TapewrightSetup.exe`, and nothing touches it
+  after that.** Signing adds a certificate table, which changes the file's SHA-256, so `sums`, the
+  `TapewrightSetup` artifact, `actions/attest` and the draft release all come after the check, and
+  Microsoft's SmartScreen guidance is not to modify a signed file. The check (`Get-AuthenticodeSignature`)
+  fails with no signer certificate or on HashMismatch, and on a release it also needs a timestamp, Valid
+  and a subject starting `CN=SignPath Foundation`. A test policy signs with a self-signed certificate,
+  which SignPath's documentation (docs.signpath.io/managing-certificates) says operating systems don't
+  trust, so a test run can't ask for Valid. That page doesn't say whether a test signature is
+  timestamped either, so on a test run a missing timestamp only prints `::warning title=No timestamp::`,
+  a workflow command that GitHub shows on the run and that fails nothing, so the first test-signing run
+  can show everything else; a release still fails without one. The uninstaller's signed copy passes the
+  same check before `build.py uninstaller-in`. Measured under Windows PowerShell 5.1 on this PC: a
+  PSF-signed `python.exe` reads Valid with a timestamper; an unsigned program (pip.exe in Python's Scripts
+  folder, Tcl's nmakehlp.exe) NotSigned with no signer; a file that isn't a program (Python's
+  `LICENSE.txt`, or a text file named fake.exe) UnknownError with no signer; and a copy of `python.exe`
+  with one byte changed HashMismatch with its signer still there. The rules, taken from `release.yml`,
+  also ran there against a stand-in `Get-AuthenticodeSignature` in eight cases, in both modes; the
+  runner's pwsh 7 hasn't run them. A test holds both checks' rules: the signer and HashMismatch refused
+  first, the timestamp, Valid and the subject only inside the release block, and the test run's branch
+  printing its warning with nothing that could fail the step. It also holds that the installer's check
+  ends by copying into `dist`, and that the last five steps are the check, sums, upload, attest and
+  release.
+- **One job, on GitHub's own runner, with no cache, and SignPath's action pinned by commit.** SignPath
+  verifies a signed file's origin only when every job leading to the request ran on GitHub-hosted
+  runners, with no caches from earlier builds, and the terms require binaries built from source in a
+  verifiable way. `signpath/github-action-submit-signing-request` is pinned to
+  `f6d04783b4569d051e0c80105fe66e82819d0092`, the commit tag v3.0 named on 2026-09-15 (GitHub's API),
+  because a tag can be moved. `actions: read` is granted because GitHub sets every permission the list
+  leaves out to none, and SignPath's documentation says the token it is handed needs actions:read and
+  contents:read to read the job and download the artifact. Uploads stay zipped, as upload-artifact does
+  by default, which is why each artifact configuration's root is `<zip-file>`; the version parameter goes
+  through `toJSON`, as SignPath's example does, since the action parses each value as a JSON string.
+  The two uploads made only for SignPath, `TapewrightSetup-unsigned` and `TapewrightUninstaller-unsigned`,
+  set `retention-days: 1`, the shortest upload-artifact v7 allows (its README and action.yml at that tag
+  give a minimum of 1 day): SignPath fetches them while the run waits, and nobody should download an
+  unsigned copy of a signing run later. For that day they can still be downloaded from the run. The
+  final `TapewrightSetup` artifact keeps the repository's default. Tests hold both, and `runs-on`, the
+  one job, no `self-hosted`, `actions/cache` or `cache:`, the pin as 40 hex digits used exactly twice, the
+  permissions, and each submit's inputs exactly.
+- **Every signing request waits for a person, inside the job's time.** The terms require manual
+  approval for every release; each approver gets an email, and one deny stops the request (SignPath's
+  projects documentation). Each submit waits up to 3600 seconds, and
+  `timeout-minutes: ${{ vars.SIGNPATH_PROJECT_SLUG != '' && 240 || 45 }}` gives a repository with
+  SignPath two such waits on top of the unsigned build's 45 minutes, inside the 6 hours GitHub allows a
+  job on its own runners. `vars` is available in `timeout-minutes` (GitHub's context availability
+  table), a variable that isn't set is an empty string, and the `&&` form needs the value after `&&` to
+  be truthy, which 240 is. A test holds that sum. With the uninstaller signed, a release is two
+  approvals. SignPath evaluates its policies for at most 3 re-runs of a build, so a run that timed out
+  waiting needs a new run, not a fourth re-run.
+- **The uninstaller's pass accepts only the stop that asks for a signature.** When `uninstaller` is
+  `true`, a first compile with `/DSignUninstaller` must end with exit code 2 and ISCC's "please attach
+  your digital signature to the following executable file", and any other ending fails, since a compile
+  broken for another reason must not pass as that stop. `build.py uninstaller-out` then copies the one
+  `uninst-*.e32` into a fresh `build/sign/uninstaller` as `uninstaller.exe`, because SignPath picks a
+  file by its name and its `pe-file` lists `.exe`, not `.e32`. That copy is uploaded, signed with the
+  `uninstaller` configuration into `build\signed-uninstaller` and checked, `build.py uninstaller-in`
+  puts it back under the `.e32` name, refusing a missing file, one not starting `MZ` or one no larger
+  than the unsigned file, and the real compile adds `/DSignUninstaller`. Signing only Setup is the
+  default, since `SIGNPATH_SIGN_UNINSTALLER` is off unless set. The pass exists because without it
+  Inno Setup leaves unins000.exe and Setup's temporary copy unsigned, and Smart App Control checks every
+  program that runs, not only what was downloaded (learn.microsoft.com). The first compile's `2>&1`
+  relies on PowerShell 7.2 and later leaving redirected native stderr out of `$ErrorActionPreference`
+  (about_Preference_Variables); its script ran only under Windows PowerShell 5.1, without the stop
+  preference, against fake ISCCs. Read: the exit code and message in Inno Setup 6.7.1's `ISCC.dpr` and
+  `Compiler.Messages.pas`, at the lines `build.UNINSTALLER`'s comment gives.
+- **What SignPath's side needs, by name.** Repository variables `SIGNPATH_ORGANIZATION_ID`,
+  `SIGNPATH_PROJECT_SLUG`, `SIGNPATH_TEST_POLICY_SLUG`, `SIGNPATH_RELEASE_POLICY_SLUG` and
+  `SIGNPATH_SIGN_UNINSTALLER` (`build.SIGNPATH_VARIABLES`; a test lets only the Signing step name the
+  last three), and the secret `SIGNPATH_API_TOKEN`, a SignPath user's token that may submit to both
+  policies. A test lets `secrets.` reach nothing but the action's `api-token`, and GitHub doesn't allow
+  secrets in `if:` anyway. The artifact configurations are entered in the SignPath project with the slugs
+  `installer` and `uninstaller`. `installer.xml` and `uninstaller.xml` in
+  `.signpath/artifact-configurations/` are copies for review that SignPath never reads, so change a copy
+  and the project together. Each is a `<zip-file>` holding one `pe-file`, restricted to the product name
+  Tapewright and the product version `${version}`, with `<authenticode-sign />`, and its `version`
+  parameter is required, so the restriction can't be skipped by leaving it out (read in
+  docs.signpath.io's artifact configuration syntax and reference). A test parses both and holds each
+  file name to what release.yml uploads. The SignPath GitHub App on the repository and the GitHub.com
+  trusted build system on the project are set up in SignPath, not here.
+- **README's Privacy section must stay true, because SignPath can revoke a certificate retroactively.**
+  The terms ask software that sends user data to systems the user didn't name for a privacy policy, that
+  policy shown during installation, and an installation option to turn it off. Whether an update check
+  counts isn't defined, so Tapewright does all three: README's Privacy section is the policy,
+  `before-install.txt` says on Setup's Information page what the check at start asks and of whom, and
+  the `startupcheck` task turns it off (see "The installer"). A broken rule lets SignPath Foundation
+  revoke the certificate "effective immediately or retroactively", which would take the trust away from
+  every signed release at once. So a change that makes Tapewright contact a new host, or send anything
+  more, updates Privacy, `before-install.txt` and the privacy links in README's "Code signing policy" in
+  the same commit. That includes a host reached by a program Tapewright only starts: winget's Node.js
+  package downloads from nodejs.org, which is why the OpenJS Foundation's policy is listed, while its
+  FFmpeg and deno packages download from github.com (read in the winget-pkgs manifests on 2026-09-15), so
+  read a package's manifest before Tapewright offers a winget update for another tool. Privacy's
+  User-Agent paragraph was read from `deps.USER_AGENT`, `fetch.py` and pip
+  26.1.1's user_agent() on this PC; the pip inside the pinned runtime hasn't been opened. A test holds
+  `before-install.txt` to every host `deps.py` looks up.
 
 ## Licensing
 
@@ -610,10 +833,12 @@ the same two lines, and `tests/test_core.py` fails when a file is missing them:
     # SPDX-FileCopyrightText: 2026 AngrySandhill
     # SPDX-License-Identifier: GPL-3.0-or-later
 
-That covers `tapewright/`, `tests/`, `Tapewright.pyw`, `packaging/*.py`, the workflows and
-`tapewright.iss`, whose two lines start with `; ` instead. `packaging/before-install.txt` and
-`packaging/release-notes.md` have none, since people read them on Setup's Information page and on
-the release page. `packaging/runtime.json` has none either, since JSON has no comments.
+That covers `tapewright/`, `tests/`, `Tapewright.pyw`, `packaging/*.py`, the workflows,
+`tapewright.iss`, whose two lines start with `; ` instead, and the artifact configurations in
+`.signpath/artifact-configurations/`, whose two lines, without the `# `, open an XML comment at the top.
+`packaging/before-install.txt` and `packaging/release-notes.md` have none, since people read them on
+Setup's Information page and on the release page. `packaging/runtime.json` and `packaging/signing.json`
+have none either, since JSON has no comments.
 
 Running yt-dlp, FFmpeg and deno as separate programs, and never shipping them, is also why
 their licenses don't reach this code. Tapewright's own FFmpeg and deno don't change that: each
@@ -627,9 +852,23 @@ lacks `--enable-gpl`, and unpacks the build's `LICENSE` beside it when the zip h
 The Windows installer does carry other people's software: python.org's Python runtime, unmodified,
 with the Tcl/Tk and pip that come in its zip. Each keeps its own license, and the license files stay
 where python.org put them in the runtime folder. `build.py check` fails without Python's
-`LICENSE.txt`. In python.org's 3.14.5 install on the PC this was built on, Tk's terms are in
-`tcl\tk8.6\license.terms` and pip's in its `dist-info` folder; the zip's layout hasn't been looked
-at. yt-dlp, FFmpeg and deno are still never in it.
+`LICENSE.txt`. In the pinned 3.14.6 zip, Tk's terms are in `tcl\tk8.6\license.terms` and pip's in its
+`dist-info` folder. yt-dlp, FFmpeg and deno are still never in it.
+
+SignPath Foundation's terms want "an OSI-approved Open Source license without commercial dual-licensing
+for all components". SPDX's license list (the one dated 2026-09-10) marks Python-2.0, Python's license,
+as OSI-approved (pip's vendored distlib carries the same text), but not every license in the runtime.
+The components known so far whose SPDX license isn't OSI-flagged are Tcl/Tk (TCL, in tcl86t.dll and
+tk86t.dll), SQLite (blessing, in sqlite3.dll) and bzip2 (bzip2-1.0.6, built into _bz2.pyd, with its terms
+in Python's `LICENSE.txt`), all present in the pinned 3.14.6 zip. The terms state no exemption from that
+condition for upstream components. Their clause allowing unsigned binaries of upstream open source
+projects inside a signed package is about what gets signed, not about licenses, and their allowance for
+System Libraries belongs to the condition against proprietary code. That allowance, which points to
+section 1 of the GPL v3, is also the only clause that could admit vcruntime140.dll and vcruntime140_1.dll,
+Microsoft's C runtime, which the zip carries too and its `LICENSE.txt` calls Microsoft Distributable Code.
+So both are questions to put to SignPath when applying (see Known gaps), not settled answers. The runtime
+still goes in as python.org published it and is never signed. Setup's settings file and the uninstaller
+signature change none of this.
 
 ## Testing
 
@@ -672,12 +911,22 @@ Ubuntu jobs under `xvfb-run` so the window tests run there too. A test that pass
 has not shown it works on the oldest Python `pyproject.toml` accepts.
 
 `tests/test_packaging.py` needs no network, no Inno Setup and no runtime. It reads `tapewright.iss`
-and `release.yml` as text and checks them against the code, tests `build.py`'s helpers with fake
-downloads and zips, and compares the committed icon with a fresh drawing, the one test there that
-skips on a Python without Tk. Whether Inno Setup compiles the script, and whether the installer
-behaves, only `release.yml` and the checklist below can show. `release.yml` also runs the whole
-suite on the runtime before marking it, with `TAPEWRIGHT_CONFIG_DIR` and `TAPEWRIGHT_TOOLS_DIR` in
-the runner's temp folder.
+and `release.yml` as text and checks them against the code, holds README, the release notes and Help
+to `packaging/signing.json`, parses the artifact configurations, tests `build.py`'s helpers with fake
+downloads, zips and uninstallers, and compares the committed icon with a fresh drawing, the one test
+there that skips on a Python without Tk. Its readers take only the shapes those files use: `Script`
+fails on anything inside an `#if` but a default `#define` or a `[Setup]` directive, and `_steps` on any
+line of release.yml it can't place, so a new construct fails a test instead of being misread. Whether
+Inno Setup compiles the script, and whether the installer behaves, only `release.yml` and the checklist
+below can show. `release.yml` also runs the whole suite on the runtime before marking it, with
+`TAPEWRIGHT_CONFIG_DIR` and `TAPEWRIGHT_TOOLS_DIR` in the runner's temp folder.
+
+A test that reads a file git checks out reads it as text, with `read_text`, never as bytes. Git for
+Windows sets core.autocrlf to true by default, on GitHub's Windows runners as on this PC, so a fresh
+checkout gives every text file CRLF line endings, while this working tree and WSL's view of it are LF,
+where a check on bytes still passes. Measured: a check on `packaging/signing.json`'s bytes passed here and
+failed in a clone made with that setting. A file whose bytes matter to the code also gets `text eol=lf`
+in `.gitattributes`.
 
 There is no automated end-to-end suite yet. To drive the real window against the real tools from
 a script, replace the modal pieces (`app.ask_outdated`, `app.confirm` and `app.inform` are
@@ -689,34 +938,49 @@ app installs into whichever Python runs it.
 ### Before publishing a release
 
 A pushed tag leaves a draft release. The maintainer publishes it only after these steps, on a spare
-standard (not administrator) Windows account:
+standard (not administrator) Windows account that has never run Tapewright, so it has no
+`%APPDATA%\Tapewright`:
 
 1. Download the draft's `TapewrightSetup.exe` with a browser, and screenshot any warning it shows.
    Compare `Get-FileHash` with `SHA256SUMS.txt`, run
-   `gh attestation verify TapewrightSetup.exe --repo angrysandhill/tapewright`, and scan it.
+   `gh attestation verify TapewrightSetup.exe --repo angrysandhill/tapewright`, and scan it. For a
+   signed release, `Get-AuthenticodeSignature` on it must say Valid, name a timestamper, and name a
+   signer starting `CN=SignPath Foundation`.
 2. Open it. No administrator (UAC) prompt may appear. Screenshot the SmartScreen box, before and
-   after "More info", for the release notes. Check what the browser's warning and this box say
-   against the README, the release notes, and Help's "Updating Tapewright" and "Windows warned me
-   about it", and look at each page of the dark wizard.
-3. On the setup page, click "Install them now", then "Cancel" during the FFmpeg download. Then
-   install everything, up to "All set!".
-4. Convert a link to MP3, a link to MP4 and a local file.
-5. "Copy details for my helper" shows a Python under `%LOCALAPPDATA%\Programs\Tapewright\runtime`,
+   after "More info", for the release notes, and for a signed release the publisher it names. Check
+   what the browser's warning and this box say against the README, the release notes, and Help's
+   "Updating Tapewright" and "Windows warned me about it", and look at each page of the dark wizard.
+3. Setup's tasks page shows "Check for updates when Tapewright starts", ticked, under the desktop
+   shortcut's box. Untick it. Once Setup has finished, `%APPDATA%\Tapewright\settings.json` holds only
+   `{"check_on_startup": false}`, and Tapewright's setup page still opens.
+4. On the setup page, click "Install them now", then "Cancel" during the FFmpeg download. Then
+   install everything, up to "All set!". The Settings tab shows "Check for updates when Tapewright
+   starts" unticked.
+5. Convert a link to MP3, a link to MP4 and a local file.
+6. "Copy details for my helper" shows a Python under `%LOCALAPPDATA%\Programs\Tapewright\runtime`,
    "the installer's own Python: yes" and Tk 8.6.15. Close Tapewright, pin its Start menu shortcut to
    the taskbar and open it from there: its window must share the pinned button rather than get one
    of its own.
-6. With Tapewright open, run the same installer again. Setup must show its AppMutex message, in the
+7. With Tapewright open, run the same installer again. Setup must show its AppMutex message, in the
    words Help's "Updating Tapewright" and the release notes repeat, and close nothing. Close
-   Tapewright and click OK; once Setup has finished, yt-dlp is still installed and the settings are
-   unchanged.
-7. Run the installer again with Tapewright closed, and open Tapewright while Setup's first page is
+   Tapewright and click OK. The tasks page offers only the desktop shortcut, since a settings file
+   exists now, and once Setup has finished, yt-dlp is still installed and the settings are unchanged.
+8. Run the installer again with Tapewright closed, and open Tapewright while Setup's first page is
    showing. Click through: the same message must appear before anything is installed, and Cancel
-   must leave the installed Tapewright as it was.
-8. When there is an earlier release, install it first and this one over it. If the pin changed, the
+   must leave the installed Tapewright as it was. Then move `%APPDATA%\Tapewright\settings.json` aside
+   and run the installer once more: untick the start-up check's box, open Tapewright before clicking
+   Install, and close it when Setup asks. Before the Finish page, Setup must show its message naming the
+   Settings tab's box, and leave the settings file Tapewright wrote as it was. Put the moved file back.
+9. When there is an earlier release, install it first and this one over it. If the pin changed, the
    setup page offers yt-dlp again.
-9. Uninstall from Installed apps. `%LOCALAPPDATA%\Programs\Tapewright` and
-   `%LOCALAPPDATA%\Tapewright` are gone, and `%APPDATA%\Tapewright\settings.json` is still there.
-10. Add the screenshots to the release notes, and publish.
+10. When the uninstaller was signed, `Get-AuthenticodeSignature` on the installed unins000.exe, in
+    `%LOCALAPPDATA%\Programs\Tapewright`, must say what step 1 asks. Uninstall from Installed apps.
+    `%LOCALAPPDATA%\Programs\Tapewright` and `%LOCALAPPDATA%\Tapewright` are gone, unins000.msg
+    included, and `%APPDATA%\Tapewright\settings.json` is still there.
+11. For a signed release, on Windows 11 with Smart App Control on, or with Microsoft's Smart App Control
+    audit policy applied, install, convert a link to MP3 and a local file, and uninstall. Note anything
+    it blocks: Setup, its temporary copy, FFmpeg, deno or a `.pyd` that yt-dlp brings.
+12. Add the screenshots to the release notes, and publish.
 
 ## Known gaps
 
@@ -751,24 +1015,59 @@ standard (not administrator) Windows account:
   upgrade command gained `--source` and the accept flags in 0.1.1, and the new command line hasn't
   been run against the real winget since. Nor has the reinstall advice the update log gives when
   winget can't help (`winget uninstall --id`).
-- The Windows installer has never been built or run. Inno Setup isn't installed on the PC this was
-  built on, so `tapewright.iss` has never been compiled and `release.yml` has never run. The
-  script's directives were checked against Inno Setup 6.7.1's help and source, and
-  `tests/test_packaging.py` checks only its text. Unproven until the first build and the checklist
-  under Testing: the preprocessor's line spanning, `RuntimeChanged`'s cached answer across
-  `[InstallDelete]` and `[Files]`, the marker's `Excludes` pattern, `PrepareToInstall`'s second look
-  for the mutex, `WizardStyle=modern dark`, the taskbar grouping by AppUserModelID, whether the
-  runner's Inno Setup is where the workflow looks, whether python.org's live index lists the pin the
-  way `build.index_has` reads it, whether the 3.14.6 zip passes `check` and the tests there, and the
-  wording of Setup's AppMutex message, which Help and the release notes repeat. Both ends in this
-  repository, `tapewright-runtime.txt` and `Tapewright.Running`, are tested only against fakes.
-  After the first CI build this becomes "built but not yet run", until the checklist passes.
+- The Windows installer has been compiled but never installed or run. On 2026-09-17 it was built by
+  hand on the Windows 10 PC this was written on, following `release.yml`'s steps, with Inno Setup 6.7.3
+  in portable mode: python.org's 3.14.6 zip passed `build.py runtime` (the pinned SHA-256, and the live
+  index as `build.index_has` reads it) and `check`, the whole suite passed on that runtime, and ISCC
+  compiled `tapewright.iss` with no warnings in about five minutes, giving a 25.9 MB
+  `TapewrightSetup.exe` that Windows reads as Tapewright 0.2.0. That settled the preprocessor's line
+  spanning, the `#if Ver` check (which stops a compile with its `#error` when the version is too old,
+  tried with a requirement of 99) and Pascal Script's type checks, which ISCC applies when it compiles
+  `[Code]`. The same build showed that Inno Setup's programs carry no version Windows can read, which
+  would have failed `release.yml`'s old version check. `release.yml` itself has never run, so whether the
+  runner's Inno Setup is where the workflow looks is still unknown, and the `#ifdef SignUninstaller`
+  block has never been compiled. Unproven until the checklist under Testing: `RuntimeChanged`'s cached
+  answer across `[InstallDelete]` and `[Files]`, the marker's `Excludes` pattern, `PrepareToInstall`'s
+  second look for the mutex, the tasks page with its second box, `NoSettingsYet`'s kept answer,
+  `CurStepChanged`'s read, write and message box, how `WizardStyle=modern dark` looks, the taskbar
+  grouping by AppUserModelID, and the wording of Setup's AppMutex message, which Help and the release
+  notes repeat. Both ends in this repository, `tapewright-runtime.txt` and `Tapewright.Running`, are
+  tested only against fakes.
 - The installer isn't signed. Until it is, SmartScreen warns about each new version (an unsigned
   file's reputation starts again with every one, from Microsoft's SmartScreen documentation), and a
   Windows 11 PC with Smart App Control on blocks it outright. Help's "Windows warned me about it",
-  the README and the release notes describe both boxes, and Help's "Updating Tapewright", the
-  README and the release notes the browser's "Keep", all from documentation; none of them has been
-  seen on this PC.
+  the README and the release notes describe both boxes, and Help's "Updating Tapewright", the README
+  and the release notes the browser's "Keep" and then Microsoft Edge's "Show more" and "Keep anyway"
+  (from Microsoft Learn's Edge SmartScreen and download failure pages), all from documentation; none of
+  them has been seen on this PC.
+- The signing steps have never run, and can't until SignPath Foundation has accepted Tapewright and set
+  up its project. The terms want a project already released in the form to be signed, and a verifiable
+  reputation for a program people download, with no threshold published, so Tapewright needs a public
+  release and some use before it applies; nobody has applied. Only a test-signing run, or SignPath, can
+  settle these. Whether a release policy accepts a run started by a pushed tag: SignPath's documentation
+  describes only allowed branch names, so ask SignPath, and if it doesn't, the release has to be run by
+  hand from `main` and create its tag after signing. Whether SignPath signs the `.e32` uploaded as
+  `uninstaller.exe`, and ISCC's second compile accepts what comes back. Whether the product version is
+  compared as 0.2.0 or 0.2.0.0. Whether a test signature carries a timestamp, which a test run only warns
+  about, and whether Windows reads it as UnknownError or NotTrusted (a test run refuses only HashMismatch
+  or no signer). Whether the signed installer lands at `build\signed\TapewrightSetup.exe`, which rests on
+  reading the action's source, and how the first compile's script behaves under the runner's pwsh 7.
+  Whether SignPath Foundation accepts python.org's runtime inside a signed installer when some of its
+  components have licenses SPDX doesn't flag as OSI-approved, and Microsoft's C runtime beside them: the
+  terms state no exemption for the first and admit the second only as a System Library, if at all (see
+  Licensing), so ask when applying.
+- A signed installer still warns until it has a reputation: Microsoft's SmartScreen documentation gives
+  no threshold, says it can take weeks, and says reputation starts again when the signing identity
+  changes. Smart App Control also checks every program Tapewright later runs or loads, and some of those
+  are unsigned whatever happens to the installer. Measured on this PC: winget's copy of Gyan's FFmpeg
+  9.0.1 `ffmpeg.exe` and the `.pyd` files pip installed for charset_normalizer and websockets are
+  NotSigned, while `deno.exe` is signed by Deno Land Inc. This PC runs Windows 10, which has no Smart
+  App Control, so none of that has been tried under it.
+- If SignPath Foundation refuses, Tapewright stays unsigned and looks at OSSign once the project has 6
+  months of activity, about March 2027. There is no work on Certum or Microsoft's Artifact Signing: a
+  certificate of one's own puts the holder's legal name, country and town or region into every signed
+  file (CA/Browser Forum Code Signing Baseline Requirements 7.1.4.2.3), and Artifact Signing takes
+  individuals only in the USA or Canada.
 - The installer accepts Arm64 Windows 11, which runs x64 programs (`x64compatible`), but it hasn't
   been tried there.
 - The fetch buttons don't check for 64-bit Windows. On 32-bit Windows the button appears and

@@ -4,7 +4,9 @@
 # Builds TapewrightSetup.exe with Inno Setup, from python.org's runtime and Tapewright's source. A pushed tag
 # v<version> ends in a draft release, which the maintainer publishes only after installing it by hand on a
 # spare account (the checklist in AGENTS.md). Run workflow builds the same installer as a workflow artifact
-# and releases nothing. Each "python packaging/build.py" step below runs the same way locally.
+# and releases nothing. Each "python packaging/build.py" step below runs the same way locally. The installer
+# goes to SignPath to be signed only when packaging/signing.json and SignPath's repository variables say so
+# (build.py signing decides, and AGENTS.md has the rest); otherwise every signing step is skipped.
 name: Release
 
 on:
@@ -16,12 +18,20 @@ permissions:
   contents: write      # gh release create
   id-token: write      # the attestation's signing certificate
   attestations: write  # storing the attestation
+  # SignPath's action hands this run's token to SignPath, which reads the job's details and downloads the
+  # unsigned artifact with it. SignPath's documentation says that needs actions: read and contents: read, and
+  # GitHub sets every permission this list leaves out to none.
+  actions: read
 
 jobs:
   installer:
     name: Windows installer
     runs-on: windows-latest
-    timeout-minutes: 45
+    # Each signing request waits for its approver, up to the hour its step allows, and signing the uninstaller
+    # too makes two. vars is available here (GitHub's context availability table), and a variable that isn't
+    # set is an empty string, so a repository without SignPath keeps the unsigned build's 45 minutes. The
+    # value after && has to be truthy for this to pick it, and 240 is.
+    timeout-minutes: ${{ vars.SIGNPATH_PROJECT_SLUG != '' && 240 || 45 }}
     defaults:
       run:
         shell: pwsh
@@ -41,10 +51,35 @@ jobs:
       - name: Versions
         id: versions
         run: python packaging/build.py versions >> $env:GITHUB_OUTPUT
+      # Whether SignPath signs this run, with which policy, and the uninstaller too, from signing.json and the
+      # repository variables. It comes before the long steps, so a half configuration fails at once.
+      - name: Signing
+        id: signing
+        env:
+          SIGNPATH_ORGANIZATION_ID: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          SIGNPATH_PROJECT_SLUG: ${{ vars.SIGNPATH_PROJECT_SLUG }}
+          SIGNPATH_TEST_POLICY_SLUG: ${{ vars.SIGNPATH_TEST_POLICY_SLUG }}
+          SIGNPATH_RELEASE_POLICY_SLUG: ${{ vars.SIGNPATH_RELEASE_POLICY_SLUG }}
+          SIGNPATH_SIGN_UNINSTALLER: ${{ vars.SIGNPATH_SIGN_UNINSTALLER }}
+        run: python packaging/build.py signing --event "$env:GITHUB_EVENT_NAME" >> $env:GITHUB_OUTPUT
       - name: Download python.org's runtime
         run: python packaging/build.py runtime
       - name: Check the runtime
         run: python packaging/build.py check
+      # Only a report, on what a signed installer would carry unsigned, since python.org's files are never
+      # sent to be signed. It changes nothing, and continue-on-error keeps a failure of the report itself
+      # from ending the build.
+      - name: List the runtime's files that aren't validly signed
+        continue-on-error: true
+        run: |
+          $root = (Resolve-Path build\runtime).Path
+          $files = @(Get-ChildItem $root -Recurse -File -Include *.exe, *.dll, *.pyd)
+          $unsigned = @(foreach ($file in $files) {
+            $status = (Get-AuthenticodeSignature -LiteralPath $file.FullName).Status
+            if ($status -ne 'Valid') { "$status  $($file.FullName.Substring($root.Length + 1))" }
+          })
+          "$($unsigned.Count) of $($files.Count) .exe, .dll and .pyd files aren't validly signed:"
+          $unsigned
       - name: Unit tests, on the runtime
         env:
           TAPEWRIGHT_CONFIG_DIR: ${{ runner.temp }}\tapewright-config
@@ -55,23 +90,176 @@ jobs:
         run: python packaging/build.py mark
       - name: Stage the app
         run: python packaging/build.py stage
-      - name: Compile the installer
-        env:
-          APP_VERSION: ${{ steps.versions.outputs.app }}
-          PY_VERSION: ${{ steps.versions.outputs.python }}
+      - name: Find Inno Setup
+        id: inno
         run: |
-          # The image's own Inno Setup 6, never a download. WizardStyle's dark mode arrived in 6.6.0.
+          # The image's own Inno Setup 6, never a download. tapewright.iss itself refuses one older than 6.6,
+          # where WizardStyle's dark mode arrived: Inno Setup's programs carry no version Windows can read
+          # (ISCC.exe 6.7.3 reports 0.0.0.0), and ISCC prints its engine version when it compiles.
           $iscc = Get-ChildItem "C:\Program Files*\Inno Setup 6\ISCC.exe" -ErrorAction SilentlyContinue |
             Select-Object -First 1
           if (-not $iscc) { throw "There is no Inno Setup 6 under Program Files." }
-          $info = $iscc.VersionInfo
-          "Inno Setup $($info.FileVersion) at $($iscc.FullName)"
-          if ([version]::new($info.FileMajorPart, $info.FileMinorPart) -lt [version]"6.6") {
-            throw "Inno Setup $($info.FileVersion) is older than 6.6."
+          "Inno Setup at $($iscc.FullName)"
+          "iscc=$($iscc.FullName)" >> $env:GITHUB_OUTPUT
+      # Signing the uninstaller is Inno Setup's two-pass flow (SignedUninstaller in tapewright.iss): this
+      # compile leaves the unsigned uninstaller in build\uninstaller and stops, SignPath signs a copy, the
+      # copy goes back, and the compile after it embeds the signature.
+      - name: Compile once, for the uninstaller to be signed
+        if: steps.signing.outputs.uninstaller == 'true'
+        env:
+          ISCC: ${{ steps.inno.outputs.iscc }}
+          APP_VERSION: ${{ steps.versions.outputs.app }}
+          PY_VERSION: ${{ steps.versions.outputs.python }}
+        run: |
+          # ISCC stops this compile on purpose once it has written uninst-*.e32, with this message and exit
+          # code 2 (build.py's UNINSTALLER says where that is in Inno Setup's source). Any other ending is a
+          # real failure. From PowerShell 7.2, redirected stderr isn't subject to $ErrorActionPreference.
+          $defines = "/DAppVersion=$env:APP_VERSION", "/DPyVersion=$env:PY_VERSION", "/DSignUninstaller"
+          $output = & $env:ISCC @defines packaging\tapewright.iss 2>&1 | ForEach-Object { "$_" }
+          $code = $LASTEXITCODE
+          $output
+          $asked = "please attach your digital signature to the following executable file"
+          if ($code -ne 2 -or -not ($output -join "`n").Contains($asked)) {
+            throw "The first compile ended with exit code $code, not with the stop that asks for a signature."
           }
+          exit 0
+      - name: Copy the uninstaller out
+        if: steps.signing.outputs.uninstaller == 'true'
+        run: python packaging/build.py uninstaller-out
+      - name: Upload the unsigned uninstaller for SignPath
+        id: unsigned-uninstaller
+        if: steps.signing.outputs.uninstaller == 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: TapewrightUninstaller-unsigned
+          path: build/sign/uninstaller/uninstaller.exe
+          if-no-files-found: error
+          # SignPath downloads it while this run waits, and nobody should come back later for an unsigned
+          # copy from a run that signs, so it is kept for upload-artifact's shortest time, one day.
+          retention-days: 1
+      # Pinned by commit, since a tag can be moved: the commit tagged v3.0.
+      - name: Sign the uninstaller with SignPath
+        if: steps.signing.outputs.uninstaller == 'true'
+        uses: signpath/github-action-submit-signing-request@f6d04783b4569d051e0c80105fe66e82819d0092  # v3.0
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: ${{ vars.SIGNPATH_PROJECT_SLUG }}
+          signing-policy-slug: ${{ steps.signing.outputs.policy }}
+          artifact-configuration-slug: uninstaller
+          github-artifact-id: ${{ steps.unsigned-uninstaller.outputs.artifact-id }}
+          wait-for-completion: true
+          wait-for-completion-timeout-in-seconds: 3600
+          output-artifact-directory: build/signed-uninstaller
+          parameters: |
+            version: ${{ toJSON(steps.versions.outputs.app) }}
+      - name: Check the uninstaller's signature
+        if: steps.signing.outputs.uninstaller == 'true'
+        env:
+          SIGNED: build\signed-uninstaller\uninstaller.exe
+          MODE: ${{ steps.signing.outputs.mode }}
+        run: |
+          # A release policy signs with SignPath Foundation's certificate, which Windows trusts, so the
+          # signature must be Valid, and timestamped, so it stays valid once the certificate expires. A test
+          # policy's certificate is self-signed, and SignPath's documentation says operating systems don't
+          # trust those, so Windows can't call it Valid. Nor does it say whether a test signature carries a
+          # timestamp, so on a test run a missing one is only a warning, and the run goes on to show the rest.
+          # Either way the signature must be there, and the file must not have changed since it was signed.
+          $signature = Get-AuthenticodeSignature -LiteralPath $env:SIGNED
+          $subject = $signature.SignerCertificate.Subject
+          "${env:SIGNED}: $($signature.Status). $($signature.StatusMessage)"
+          "Signed by: $subject"
+          "Timestamped by: $($signature.TimeStamperCertificate.Subject)"
+          if (-not $signature.SignerCertificate) { throw "$env:SIGNED carries no signature." }
+          if ($signature.Status -eq 'HashMismatch') { throw "$env:SIGNED has changed since it was signed." }
+          if ($env:MODE -eq 'release') {
+            if (-not $signature.TimeStamperCertificate) { throw "$env:SIGNED's signature has no timestamp." }
+            if ($signature.Status -ne 'Valid') { throw "$env:SIGNED's signature isn't valid." }
+            if (-not $subject.StartsWith('CN=SignPath Foundation', 'Ordinal')) {
+              throw "$env:SIGNED is signed by $subject, not SignPath Foundation."
+            }
+          } elseif (-not $signature.TimeStamperCertificate) {
+            # A workflow command: GitHub shows it on the run as a warning, and it fails nothing.
+            $warning = "$env:SIGNED's test signature has no timestamp, which a release signature must have."
+            "::warning title=No timestamp::$warning"
+          }
+      - name: Put the signed uninstaller back
+        if: steps.signing.outputs.uninstaller == 'true'
+        run: python packaging/build.py uninstaller-in --signed build/signed-uninstaller/uninstaller.exe
+      - name: Compile the installer
+        env:
+          ISCC: ${{ steps.inno.outputs.iscc }}
+          APP_VERSION: ${{ steps.versions.outputs.app }}
+          PY_VERSION: ${{ steps.versions.outputs.python }}
+          SIGN_UNINSTALLER: ${{ steps.signing.outputs.uninstaller }}
+        run: |
           $defines = "/DAppVersion=$env:APP_VERSION", "/DPyVersion=$env:PY_VERSION"
-          & $iscc.FullName @defines packaging\tapewright.iss
+          # With the signed copy back in build\uninstaller, this compile embeds it.
+          if ($env:SIGN_UNINSTALLER -eq 'true') { $defines += "/DSignUninstaller" }
+          & $env:ISCC @defines packaging\tapewright.iss
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      # SignPath downloads what it signs from this run, so the unsigned installer goes up on its own, zipped
+      # as upload-artifact always does, which is why installer.xml's root is a zip-file.
+      - name: Upload the unsigned installer for SignPath
+        id: unsigned
+        if: steps.signing.outputs.mode != 'none'
+        uses: actions/upload-artifact@v7
+        with:
+          name: TapewrightSetup-unsigned
+          path: dist/TapewrightSetup.exe
+          if-no-files-found: error
+          # Kept for one day, like the unsigned uninstaller: SignPath needs it only while this run waits, and
+          # nobody should come back later for an unsigned copy.
+          retention-days: 1
+      - name: Sign the installer with SignPath
+        if: steps.signing.outputs.mode != 'none'
+        uses: signpath/github-action-submit-signing-request@f6d04783b4569d051e0c80105fe66e82819d0092  # v3.0
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: ${{ vars.SIGNPATH_PROJECT_SLUG }}
+          signing-policy-slug: ${{ steps.signing.outputs.policy }}
+          artifact-configuration-slug: installer
+          github-artifact-id: ${{ steps.unsigned.outputs.artifact-id }}
+          wait-for-completion: true
+          wait-for-completion-timeout-in-seconds: 3600
+          output-artifact-directory: build/signed
+          parameters: |
+            version: ${{ toJSON(steps.versions.outputs.app) }}
+      # The same checks as the uninstaller's, then the signed file takes the unsigned one's place. Nothing
+      # writes to it after this.
+      - name: Check the installer's signature
+        if: steps.signing.outputs.mode != 'none'
+        env:
+          SIGNED: build\signed\TapewrightSetup.exe
+          MODE: ${{ steps.signing.outputs.mode }}
+        run: |
+          # A release policy signs with SignPath Foundation's certificate, which Windows trusts, so the
+          # signature must be Valid, and timestamped, so it stays valid once the certificate expires. A test
+          # policy's certificate is self-signed, and SignPath's documentation says operating systems don't
+          # trust those, so Windows can't call it Valid. Nor does it say whether a test signature carries a
+          # timestamp, so on a test run a missing one is only a warning, and the run goes on to show the rest.
+          # Either way the signature must be there, and the file must not have changed since it was signed.
+          $signature = Get-AuthenticodeSignature -LiteralPath $env:SIGNED
+          $subject = $signature.SignerCertificate.Subject
+          "${env:SIGNED}: $($signature.Status). $($signature.StatusMessage)"
+          "Signed by: $subject"
+          "Timestamped by: $($signature.TimeStamperCertificate.Subject)"
+          if (-not $signature.SignerCertificate) { throw "$env:SIGNED carries no signature." }
+          if ($signature.Status -eq 'HashMismatch') { throw "$env:SIGNED has changed since it was signed." }
+          if ($env:MODE -eq 'release') {
+            if (-not $signature.TimeStamperCertificate) { throw "$env:SIGNED's signature has no timestamp." }
+            if ($signature.Status -ne 'Valid') { throw "$env:SIGNED's signature isn't valid." }
+            if (-not $subject.StartsWith('CN=SignPath Foundation', 'Ordinal')) {
+              throw "$env:SIGNED is signed by $subject, not SignPath Foundation."
+            }
+          } elseif (-not $signature.TimeStamperCertificate) {
+            # A workflow command: GitHub shows it on the run as a warning, and it fails nothing.
+            $warning = "$env:SIGNED's test signature has no timestamp, which a release signature must have."
+            "::warning title=No timestamp::$warning"
+          }
+          Copy-Item -LiteralPath $env:SIGNED -Destination dist\TapewrightSetup.exe -Force
+      # After signing, so the checksums, the artifact and the attestation describe the file people download.
       - name: Checksums
         run: python packaging/build.py sums dist/TapewrightSetup.exe
       - uses: actions/upload-artifact@v7

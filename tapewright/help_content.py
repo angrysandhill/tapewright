@@ -311,8 +311,8 @@ TOPICS = [
                 "Click the [Settings] tab, then click [Open the download page]. Your web browser opens the "
                 "page with the new version.",
                 "Under Assets on that page, click TapewrightSetup.exe, and your browser downloads it. "
-                "If your browser says the file isn't commonly downloaded, choose Keep. Some browsers put "
-                "Keep in a menu behind three dots beside the download.",
+                "If your browser says the file isn't commonly downloaded, choose Keep. In Microsoft Edge, "
+                "click the three dots beside the download, then Keep, Show more and Keep anyway.",
                 "Open it: click it where your browser shows the download, or double-click it in your "
                 "Downloads folder. If Windows warns you about it, click Windows warned me about it in the "
                 "list of questions on the left.",
@@ -343,8 +343,8 @@ TOPICS = [
                   "Unknown publisher."),
             ("p", "If the box has no Run anyway button, only OK, this computer blocks programs that aren't "
                   "signed, for example with a Windows 11 setting called Smart App Control. Click OK: nothing "
-                  "has been installed. Then wait for a signed version of Tapewright, or run Tapewright from "
-                  "its source code instead, which Tapewright's page on github.com explains."),
+                  "has been installed. Instead, you can run Tapewright from its source code, which "
+                  "Tapewright's page on github.com explains."),
             ("tip", "Only click Run anyway for a file from Tapewright's own download page. To open that "
                     "page, click the button below that says Open the Tapewright download page."),
         ],

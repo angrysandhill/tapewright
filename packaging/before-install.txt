@@ -3,3 +3,9 @@ Tapewright will be installed just for you, in your own user folder. It doesn't n
 It brings its own private copy of Python, the language Tapewright is written in, so it won't touch any Python you already have.
 
 The first time Tapewright opens, it offers to download the helper programs it needs. Nothing is downloaded until you say yes.
+
+When Tapewright starts, it checks whether newer versions of its helpers, and of Tapewright itself, are out, so it can tell you when something needs updating. It asks pypi.org about yt-dlp, www.gyan.dev about FFmpeg, dl.deno.land about deno and api.github.com about Tapewright. Like any website, each of these sees your computer's internet address. Tapewright never sends them anything about what you convert.
+
+If Tapewright has no settings saved for you on this computer yet, the next page has a box that says Check for updates when Tapewright starts. Untick it to turn these checks off. Whether that box is there or not, the same box on Tapewright's Settings tab turns them off, or back on, at any time.
+
+Everything Tapewright connects to, and why, is listed under Privacy on Tapewright's page on github.com.
